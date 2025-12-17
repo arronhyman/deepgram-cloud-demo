@@ -48,7 +48,9 @@ function stopSession() {
   micBtn.innerText = "Start Demo";
   transcriptDiv.innerText += " (Session ended)";
 
-  if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      mediaRecorder.stop();
+  }
   if (sttSocket) {
     sttSocket.close();
     sttSocket = null;
@@ -58,38 +60,49 @@ function stopSession() {
 /* ---------------------------
    STT (SPEECH TO TEXT)
 ---------------------------- */
-async function startSTT() {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+function startSTT() {
+    // 1. URL without token
+    const sttUrl = 'wss://api.deepgram.com/v1/listen?model=nova-2&interim_results=true&smart_format=true&endpointing=300';
+    
+    // 2. Pass token as subprotocol using the global deepgramKey
+    // NOTE: removing 'const' so we write to the global sttSocket variable
+    sttSocket = new WebSocket(sttUrl, ['token', deepgramKey]);
 
-  // STT uses the subprotocol method for auth (standard for Deepgram STT)
-  const sttUrl = "wss://api.deepgram.com/v1/listen?model=nova-2&interim_results=true&smart_format=true&endpointing=300";
-  sttSocket = new WebSocket(sttUrl, ["token", deepgramKey]);
+    sttSocket.onopen = () => {
+        console.log('STT Connected');
+        
+        navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+            // NOTE: removing 'const' so we write to the global mediaRecorder variable
+            mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+            
+            mediaRecorder.addEventListener('dataavailable', event => {
+                if (event.data.size > 0 && sttSocket.readyState === 1) {
+                    sttSocket.send(event.data);
+                }
+            });
 
-  sttSocket.onopen = () => {
-    if (mediaRecorder.state === "inactive") mediaRecorder.start(250);
-  };
+            mediaRecorder.start(250); // Send chunks every 250ms
+        });
+    };
 
-  mediaRecorder.ondataavailable = (event) => {
-    if (event.data.size > 0 && sttSocket.readyState === WebSocket.OPEN) {
-      sttSocket.send(event.data);
-    }
-  };
+    sttSocket.onmessage = (message) => {
+        const received = JSON.parse(message.data);
+        const transcript = received.channel.alternatives[0].transcript;
+        
+        // Update UI with interim results
+        if (transcript) {
+          transcriptDiv.innerText = transcript;
+        }
 
-  sttSocket.onmessage = async (event) => {
-    const data = JSON.parse(event.data);
-    const alt = data.channel?.alternatives?.[0];
-    if (!alt?.transcript) return;
+        // On Final result, send to AI
+        if (transcript && received.is_final) {
+            console.log("User said:", transcript);
+            handleAIStreamingResponse(transcript);
+        }
+    };
 
-    transcriptDiv.innerText = alt.transcript;
-
-    if (data.is_final) {
-      // Stop listening immediately to process response
-      mediaRecorder.stop();
-      sttSocket.close();
-      await handleAIStreamingResponse(alt.transcript);
-    }
-  };
+    sttSocket.onerror = (error) => { console.error("STT Error:", error); };
+    sttSocket.onclose = () => { console.log("STT Connection Closed"); };
 }
 
 /* ---------------------------
@@ -135,9 +148,7 @@ async function handleAIStreamingResponse(userText) {
       }
     }
     
-    // Close TTS input (Deepgram will finish speaking what's buffered)
-    // Sending a specialized close frame or just closing connection
-    // For Deepgram TTS, usually you just stop sending text.
+    // Optional: Send a Flush command if Deepgram supports it, or just let it finish
     console.log("LLM stream finished.");
 
   } catch (err) {
@@ -151,10 +162,11 @@ async function handleAIStreamingResponse(userText) {
 ---------------------------- */
 function connectTTSSocket() {
   return new Promise((resolve, reject) => {
-    // FIX: Pass token in URL query params, NOT in subprotocols
-    const ttsUrl = `wss://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=opus&container=webm&token=${deepgramKey}`;
+    // 1. URL without token
+    const ttsUrl = `wss://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=opus&container=webm`;
 
-    const socket = new WebSocket(ttsUrl);
+    // 2. Pass token as subprotocol
+    const socket = new WebSocket(ttsUrl, ['token', deepgramKey]);
     socket.binaryType = "arraybuffer";
 
     // Setup Audio Context
@@ -201,7 +213,10 @@ function connectTTSSocket() {
 
       socket.onerror = (error) => {
         console.error("TTS WebSocket Error:", error);
-        reject(error);
+        // Only reject if it happens during connection phase
+        if (socket.readyState !== WebSocket.OPEN) {
+            reject(error);
+        }
       };
       
       socket.onclose = () => {
