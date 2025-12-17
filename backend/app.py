@@ -10,7 +10,8 @@ secrets = boto3.client('secretsmanager')
 
 def get_deepgram_key():
     try:
-        secret_arn = os.environ.get('SECRETS_ARN')
+        # Retrieves the ARN you defined in template.yaml
+        secret_arn = os.environ.get('SECRETS_ARN') 
         if not secret_arn:
             return None
         response = secrets.get_secret_value(SecretId=secret_arn)
@@ -33,7 +34,6 @@ def lambda_handler(event, context):
     # 2. Parse Inputs (Query Params OR Body)
     query_params = event.get('queryStringParameters') or {}
     
-    # Try to parse body safely
     body = {}
     if event.get('body'):
         try:
@@ -41,41 +41,48 @@ def lambda_handler(event, context):
         except:
             pass
 
-    # Determine Action: Check URL first (?route=auth), then Body ({action: 'auth'})
+    # Determine Action
     action = query_params.get('route') or query_params.get('action') or body.get('action', 'chat')
 
     # --- ROUTE 1: AUTH ---
     if action == 'auth':
         master_key = get_deepgram_key()
-        if not master_key or "PLACEHOLDER" in master_key:
+        if not master_key:
             return {
                 "statusCode": 500, 
-                "headers": headers,
+                "headers": headers, 
                 "body": json.dumps({"error": "API Key not configured in Secrets Manager"})
             }
-            
+        
+        # Return the key directly to the client
         return {
             "statusCode": 200,
             "headers": headers,
             "body": json.dumps({"key": master_key})
         }
 
-    # --- ROUTE 2: CHAT ---
+    # --- ROUTE 2: CHAT (With Sentiment) ---
     user_text = body.get('text', '')
+    user_sentiment = body.get('sentiment', 'neutral') 
     session_id = body.get('session_id', 'demo_session')
     
     if not user_text:
-        return {
-            "statusCode": 400, 
-            "headers": headers, 
-            "body": json.dumps({"error": "No text provided"})
-        }
+        return {"statusCode": 400, "headers": headers, "body": json.dumps({"error": "No text"})}
 
-    # Call Claude 3 Haiku
-    prompt = f"User: {user_text}\n\nYou are a helpful support assistant. Answer in 1 short sentence."
+    # Prompt Engineering with Sentiment
+    prompt = f"""
+    User Input: "{user_text}"
+    Detected Sentiment: {user_sentiment}
+    
+    You are a helpful voice assistant. 
+    1. Answer the user's input clearly.
+    2. Adjust your tone based on the detected sentiment (e.g., if they are frustrated, be empathetic).
+    3. Keep your response short (max 2 sentences) because it will be spoken out loud.
+    """
+    
     payload = {
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 100,
+        "max_tokens": 150,
         "messages": [{"role": "user", "content": prompt}]
     }
     
@@ -87,24 +94,25 @@ def lambda_handler(event, context):
         result = json.loads(response['body'].read())
         ai_text = result['content'][0]['text']
         
-        # Log to DynamoDB (if table exists)
+        # Log to DynamoDB
         table_name = os.environ.get('TABLE_NAME')
         if table_name:
             dynamodb.Table(table_name).put_item(Item={
                 'session_id': session_id,
                 'timestamp': datetime.now().isoformat(),
                 'user': user_text,
+                'sentiment': user_sentiment,
                 'ai': ai_text
             })
 
         return {
             "statusCode": 200, 
-            "headers": headers,
+            "headers": headers, 
             "body": json.dumps({"response": ai_text})
         }
         
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"Bedrock Error: {e}")
         return {
             "statusCode": 500, 
             "headers": headers, 
