@@ -8,19 +8,22 @@ Parameters:
     Default: deepgram.lesuto.com
   HostedZoneId:
     Type: String
-    Description: The Route53 Hosted Zone ID for lesuto.com
+    Default: Z021462718WHYPRPOOQ2 # Your specific Zone ID
 
 Globals:
   Function:
-    Timeout: 15
+    Timeout: 20
     MemorySize: 256
     Environment:
       Variables:
         TABLE_NAME: !Ref ConversationTable
-        DEEPGRAM_API_KEY: "{{resolve:secretsmanager:DeepgramApiKey}}" # Store key in AWS Secrets Manager manually first!
+        # We will fetch the key from Secrets Manager in the code, or env var
+        # For simplicity in this demo, we assume you set this env var in the console 
+        # OR better: use the Secrets Manager setup below.
+        SECRETS_ARN: !Ref DeepgramSecret
 
 Resources:
-  # 1. Database
+  # --- 1. STORAGE ---
   ConversationTable:
     Type: AWS::Serverless::SimpleTable
     Properties:
@@ -29,7 +32,15 @@ Resources:
         Name: session_id
         Type: String
 
-  # 2. Backend API (Lambda)
+  # --- 2. SECRETS (Placeholders) ---
+  DeepgramSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: DeepgramApiKey_Demo
+      Description: API Key for Deepgram Demo
+      SecretString: '{"api_key":"PLACEHOLDER_CHANGE_ME_IN_CONSOLE"}'
+
+  # --- 3. BACKEND (LAMBDA) ---
   BackendFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -51,21 +62,16 @@ Resources:
             - Effect: Allow
               Action: bedrock:InvokeModel
               Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref DeepgramSecret
 
-  # 3. SSL Certificate (Auto-validated via DNS)
-  SSLCertificate:
-    Type: AWS::CertificateManager::Certificate
-    Properties:
-      DomainName: !Ref DomainName
-      ValidationMethod: DNS
-      DomainValidationOptions:
-        - DomainName: !Ref DomainName
-          HostedZoneId: !Ref HostedZoneId
-
-  # 4. Frontend Hosting (S3)
+  # --- 4. FRONTEND HOSTING (S3 + CloudFront + SSL) ---
   FrontendBucket:
     Type: AWS::S3::Bucket
     Properties:
+      BucketName: !Sub "deepgram-demo-frontend-${AWS::AccountId}"
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         IgnorePublicAcls: true
@@ -81,6 +87,7 @@ Resources:
         SigningBehavior: always
         SigningProtocol: sigv4
 
+  # Policy to let CloudFront read S3
   BucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -97,7 +104,17 @@ Resources:
               StringEquals:
                 AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistro}"
 
-  # 5. CDN (CloudFront)
+  # SSL Certificate
+  SSLCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+
+  # CloudFront Distribution
   CloudFrontDistro:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -109,6 +126,7 @@ Resources:
         ViewerCertificate:
           AcmCertificateArn: !Ref SSLCertificate
           SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
         Origins:
           - Id: S3Origin
             DomainName: !GetAtt FrontendBucket.DomainName
@@ -117,14 +135,14 @@ Resources:
         DefaultCacheBehavior:
           TargetOriginId: S3Origin
           ViewerProtocolPolicy: redirect-to-https
-          AllowedMethods: [GET, HEAD]
+          AllowedMethods: [GET, HEAD, OPTIONS]
           CachedMethods: [GET, HEAD]
           ForwardedValues:
             QueryString: false
             Cookies:
               Forward: none
 
-  # 6. DNS Record
+  # --- 5. DNS ---
   DNSRecord:
     Type: AWS::Route53::RecordSet
     Properties:
@@ -132,11 +150,12 @@ Resources:
       Name: !Ref DomainName
       Type: A
       AliasTarget:
-        HostedZoneId: Z2FDTNDATAQYW2 # This is the fixed CloudFront Zone ID
+        HostedZoneId: Z2FDTNDATAQYW2 # CloudFront's Fixed Zone ID
         DNSName: !GetAtt CloudFrontDistro.DomainName
 
 Outputs:
   ApiEndpoint:
+    Description: "API URL for the Frontend"
     Value: !GetAtt BackendFunctionUrl.FunctionUrl
   BucketName:
     Value: !Ref FrontendBucket
