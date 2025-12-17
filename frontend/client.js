@@ -22,7 +22,7 @@ document.getElementById('micBtn').addEventListener('click', async () => {
 
     // 1. Get Auth Token
     btn.innerText = "Connecting...";
-    try {
+    try { 
         // We use ?route=auth to hit the specific logic in Python
         const authRes = await fetch(API_URL + "?route=auth");
         const authData = await authRes.json();
