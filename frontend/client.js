@@ -93,7 +93,7 @@ document.getElementById('micBtn').addEventListener('click', async () => {
                 document.getElementById('ai-response').innerText = `AI: ${aiResponse}`;
                 
                 // 5. Speak Result (Deepgram Aura)
-                await speakWithDeepgram(aiResponse);
+                //await speakWithDeepgram(aiResponse);
             }
         }
     };
