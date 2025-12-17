@@ -76,6 +76,9 @@ def lambda_handler(event, context):
     1. Answer the user's input clearly.
     2. Adjust your tone based on the detected sentiment (e.g., if they are frustrated, be empathetic).
     3. Keep your response short (max 2 sentences) because it will be spoken out loud.
+    4. You are an expert in providing concise and relevant information.
+    5. Always aim to improve the user's experience based on their emotional state.
+    6. Respond in a friendly and engaging manner.
     """
     
     payload = {
