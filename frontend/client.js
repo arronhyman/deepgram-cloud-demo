@@ -1,211 +1,153 @@
-const micBtn = document.getElementById("micBtn");
-const transcriptDiv = document.getElementById("transcript");
-const aiResponseDiv = document.getElementById("ai-response");
+// YOUR SPECIFIC LAMBDA URL
+const API_URL = "https://sapucalvhlquhnlmlerjslz7se0gmbto.lambda-url.us-east-1.on.aws/"; 
 
-let deepgramKey = null;
-let sttSocket = null;
-let ttsSocket = null;
-
+let socket;
+let mediaRecorder;
+let deepgramKey; 
+let isSpeaking = false;
+let currentAudio = null;let ttsSocket = null;
 let audioContext = null;
 let audioQueue = [];
 let isPlaying = false;
 
-const LAMBDA_URL =
-  "https://sapucalvhlquhnlmlerjslz7se0gmbto.lambda-url.us-east-1.on.aws";
 
-/* ---------------------------
-   FETCH DEEPGRAM API KEY
----------------------------- */
-async function fetchDeepgramKey() {
-  const res = await fetch(`${LAMBDA_URL}?route=auth`);
-  const data = await res.json();
-  deepgramKey = data.key;
-}
-
-/* ---------------------------
-   START MICROPHONE + STT
----------------------------- */
-async function startListening() {
-  if (!deepgramKey) {
-    await fetchDeepgramKey();
-  }
-
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const mediaRecorder = new MediaRecorder(stream, {
-    mimeType: "audio/webm",
-  });
-
-  const sttUrl =
-    "wss://api.deepgram.com/v1/listen" +
-    "?model=nova-2" +
-    "&language=en-US" +
-    "&interim_results=true" +
-    "&endpointing=300";
-
-  sttSocket = new WebSocket(sttUrl, ["token", deepgramKey]);
-
-  sttSocket.onopen = () => {
-    mediaRecorder.start(250);
-  };
-
-  mediaRecorder.ondataavailable = (event) => {
-    if (event.data.size > 0 && sttSocket.readyState === 1) {
-      sttSocket.send(event.data);
+document.getElementById('micBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('micBtn');
+    
+    // Toggle Logic
+    if (btn.classList.contains("active")) {
+        // Stop Everything
+        if(mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+        if(socket) socket.close();
+        
+        btn.innerText = "Start Demo";
+        btn.classList.remove("active");
+        document.getElementById('transcript').innerText = "Session ended.";
+        return;
     }
-  };
 
-  sttSocket.onmessage = async (event) => {
-    const data = JSON.parse(event.data);
-    const alt = data.channel?.alternatives?.[0];
-    if (!alt?.transcript) return;
-
-    transcriptDiv.innerText = alt.transcript;
-
-    // Only act on FINAL transcripts
-    if (!data.is_final) return;
-
-    mediaRecorder.stop();
-    sttSocket.close();
-
-    await handleAIResponse(alt.transcript);
-  };
-}
-
-/* ---------------------------
-   CALL LAMBDA (AI RESPONSE)
----------------------------- */
-async function handleAIResponse(text) {
-  aiResponseDiv.innerText = "Thinking...";
-
-  const res = await fetch(LAMBDA_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: "chat",
-      text,
-      session_id: "demo",
-    }),
-  });
-
-  const data = await res.json();
-  aiResponseDiv.innerText = data.response;
-
-  speakStreaming(data.response);
-}
-
-/* ---------------------------
-   STREAMING TTS (FIXES LAG)
----------------------------- */
-function speakStreaming(text) {
-  if (!deepgramKey || !text) return;
-
-  // Kill previous speech immediately
-  if (ttsSocket) {
-    ttsSocket.close();
-    ttsSocket = null;
-  }
-
-  if (!audioContext) {
-    audioContext = new AudioContext();
-  }
-
-  audioQueue = [];
-  isPlaying = false;
-
-  const ttsUrl =
-    "wss://api.deepgram.com/v1/speak" +
-    "?model=aura-asteria-en" +
-    "&encoding=linear16" +
-    "&sample_rate=16000";
-
-  ttsSocket = new WebSocket(ttsUrl, ["token", deepgramKey]);
-  ttsSocket.binaryType = "arraybuffer";
-
-  ttsSocket.onopen = () => {
-    ttsSocket.send(JSON.stringify({ text }));
-  };
-
-  ttsSocket.onmessage = async (event) => {
-    if (!(event.data instanceof ArrayBuffer)) return;
-    audioQueue.push(event.data);
-    if (!isPlaying) playAudioQueue();
-  };
-
-  ttsSocket.onclose = () => {
-    ttsSocket = null;
-  };
-
-  ttsSocket.onerror = (e) => {
-    console.error("TTS error", e);
-  };
-}
-
-/* ---------------------------
-   AUDIO PLAYBACK PIPELINE
----------------------------- */
-async function playAudioQueue() {
-  if (audioQueue.length === 0) {
-    isPlaying = false;
-    return;
-  }
-
-  isPlaying = true;
-
-  const chunk = audioQueue.shift();
-  const wavBuffer = pcm16ToWav(chunk);
-
-  const audioBuffer = await audioContext.decodeAudioData(wavBuffer);
-  const source = audioContext.createBufferSource();
-  source.buffer = audioBuffer;
-  source.connect(audioContext.destination);
-  source.start();
-
-  source.onended = () => {
-    playAudioQueue();
-  };
-}
-
-/* ---------------------------
-   PCM → WAV CONVERTER
----------------------------- */
-function pcm16ToWav(pcmData) {
-  const pcm16 = new Int16Array(pcmData);
-  const buffer = new ArrayBuffer(44 + pcm16.length * 2);
-  const view = new DataView(buffer);
-
-  function writeStr(o, s) {
-    for (let i = 0; i < s.length; i++) {
-      view.setUint8(o + i, s.charCodeAt(i));
+    // 1. Get Auth Token
+    btn.innerText = "Connecting...";
+    try {
+        // We use ?route=auth to hit the specific logic in Python
+        const authRes = await fetch(API_URL + "?route=auth");
+        const authData = await authRes.json();
+        
+        if (!authData.key) throw new Error(authData.error || "No Key Returned");
+        deepgramKey = authData.key;
+    } catch (e) {
+        alert("Auth Error: " + e.message);
+        btn.innerText = "Start Demo";
+        return;
     }
-  }
 
-  writeStr(0, "RIFF");
-  view.setUint32(4, 36 + pcm16.length * 2, true);
-  writeStr(8, "WAVE");
-  writeStr(12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, 16000, true);
-  view.setUint32(28, 32000, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeStr(36, "data");
-  view.setUint32(40, pcm16.length * 2, true);
+    // 2. Open Microphone
+    let stream;
+    try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+        alert("Microphone Error: " + e.message);
+        return;
+    }
+    
+    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
 
-  let offset = 44;
-  for (let i = 0; i < pcm16.length; i++, offset += 2) {
-    view.setInt16(offset, pcm16[i], true);
-  }
+    // 3. Connect to Deepgram (Nova-2 + Sentiment + Smart Format)
+    const dgParams = "model=nova-2&smart_format=true&sentiment=true&punctuate=true";
+    socket = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, [
+        'token', deepgramKey
+    ]);
 
-  return buffer;
+    socket.onopen = () => {
+        btn.innerText = "Stop";
+        btn.classList.add("active");
+        document.getElementById('transcript').innerText = "Listening...";
+        
+        mediaRecorder.addEventListener('dataavailable', event => {
+            if (event.data.size > 0 && socket.readyState === 1) {
+                socket.send(event.data);
+            }
+        });
+        mediaRecorder.start(250);
+    };
+
+    socket.onmessage = async (message) => {
+        const received = JSON.parse(message.data);
+        const alternative = received.channel?.alternatives[0];
+        
+        if (alternative && received.is_final) {
+            const transcript = alternative.transcript;
+            const sentiment = alternative.sentiment; // e.g., "positive", "negative"
+            
+            if (transcript) {
+                document.getElementById('transcript').innerHTML = 
+                    `You (${sentiment}): ${transcript}`;
+                
+                // 4. Send to Bedrock (Brain)
+                document.getElementById('ai-response').innerText = "AI thinking...";
+                
+                const brainRes = await fetch(API_URL, {
+                    method: 'POST',
+                    body: JSON.stringify({ 
+                        text: transcript,
+                        sentiment: sentiment 
+                    })
+                });
+                const brainData = await brainRes.json();
+                const aiResponse = brainData.response;
+                
+                document.getElementById('ai-response').innerText = `AI: ${aiResponse}`;
+                
+                // 5. Speak Result (Deepgram Aura)
+                await speakWithDeepgram(aiResponse);
+            }
+        }
+    };
+    
+    socket.onclose = () => {
+        if (btn.classList.contains("active")) {
+             btn.click(); // Trigger stop UI cleanup
+        }
+    };
+});
+
+// TTS Function
+async function speakWithDeepgram(text) {
+    if (!deepgramKey || isSpeaking) return;
+
+    isSpeaking = true;
+
+    if (currentAudio) {
+        currentAudio.pause();
+        currentAudio = null;
+    }
+
+    try {
+        const response = await fetch(
+            "https://api.deepgram.com/v1/speak?model=aura-asteria-en",
+            {
+                method: "POST",
+                headers: {
+                    "Authorization": `Token ${deepgramKey}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ text })
+            }
+        );
+
+        const blob = await response.blob();
+        const audioUrl = URL.createObjectURL(blob);
+
+        currentAudio = new Audio(audioUrl);
+        currentAudio.play();
+
+        currentAudio.onended = () => {
+            isSpeaking = false;
+            URL.revokeObjectURL(audioUrl);
+        };
+
+    } catch (e) {
+        console.error("TTS Error:", e);
+        isSpeaking = false;
+    }
 }
-
-/* ---------------------------
-   UI
----------------------------- */
-micBtn.onclick = () => {
-  transcriptDiv.innerText = "Listening...";
-  aiResponseDiv.innerText = "";
-  startListening();
-};
