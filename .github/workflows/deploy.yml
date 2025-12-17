@@ -2,6 +2,7 @@ name: Deploy Deepgram Cloud Demo
 on:
   push:
     branches: [ "main" ]
+  # Allows you to run this workflow manually from the Actions tab if needed
   workflow_dispatch:
 
 permissions:
@@ -14,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       
-      # 1. Check which files were modified
+      # 1. NEW STEP: Check which files were modified
       - uses: dorny/paths-filter@v2
         id: changes
         with:
@@ -22,8 +23,8 @@ jobs:
             infra:
               - 'template.yaml'
               - 'samconfig.toml'
-              - '**.py'
-              - 'backend/**'
+              - '**.py'     # Assuming your Lambda code is Python
+              - 'backend/**' # Adjust this if your code is in a specific folder
             frontend:
               - 'frontend/**'
 
@@ -36,35 +37,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
-      # 2. Build (Only if infra changed)
-      - name: Build
-        if: steps.changes.outputs.infra == 'true'
-        run: sam build
-
-      # 3. Deploy Infrastructure (Only if infra changed)
-      - name: Deploy Infrastructure
-        if: steps.changes.outputs.infra == 'true'
+      - name: Sync Frontend to S3
+        if: steps.changes.outputs.frontend == 'true' || steps.changes.outputs.infra == 'true'
         run: |
-          sam deploy --no-confirm-changeset --no-fail-on-empty-changeset \
-            --stack-name deepgram-cloud-demo \
-            --resolve-s3 --capabilities CAPABILITY_IAM \
-            --region us-east-1
-
-      # 4. Sync Frontend (Run ALWAYS to ensure cache headers are fixed)
-      - name: Configure Frontend & Sync
-        if: always()
-        run: |
-          # A. Get Outputs from CloudFormation
-          BUCKET=$(aws cloudformation describe-stacks --stack-name deepgram-cloud-demo --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" --output text)
-          API_URL=$(aws cloudformation describe-stacks --stack-name deepgram-cloud-demo --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" --output text)
-          
-          echo "Syncing to Bucket: $BUCKET"
-          echo "Using API URL: $API_URL"
-
-          # B. Inject the API URL into main.js
-          # This looks for 'YOUR_LAMBDA_FUNCTION_URL_HERE' and replaces it with the real URL
-          sed -i "s|YOUR_LAMBDA_FUNCTION_URL_HERE|$API_URL|g" ./frontend/*.js
-
-          # C. Sync ALL files with NO CACHE headers
-          # This forces the browser to download fresh files every time
-          aws s3 sync ./frontend s3://$BUCKET --delete --cache-control "no-store, no-cache, must-revalidate, max-age=0"
+          aws s3 sync ./frontend s3://deepgram-demo-frontend-551805034614 --delete
