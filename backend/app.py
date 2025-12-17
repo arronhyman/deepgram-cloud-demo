@@ -19,15 +19,30 @@ def get_deepgram_key():
         print(f"Secret Error: {e}")
         return None
 
-def lambda_handler(event, context):
-    # Only Content-Type header — let AWS Function URL handle all CORS headers
-    headers = {
-        "Content-Type": "application/json"
-    }
+def add_cors_headers(response):
+    """Add full CORS headers to any response"""
+    if 'headers' not in response:
+        response['headers'] = {}
+    response['headers'].update({
+        "Access-Control-Allow-Origin": "*",  # Or "https://deepgram.lesuto.com" for security
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",  # Add more if needed (e.g., Authorization)
+        "Access-Control-Max-Age": "86400"
+    })
+    return response
 
-    # REMOVED: Manual OPTIONS handling
-    # AWS will now automatically respond to preflight OPTIONS with proper CORS headers
-    # because CORS is enabled in the Function URL configuration
+def lambda_handler(event, context):
+    # Base headers (will be enhanced with CORS)
+    base_headers = {"Content-Type": "application/json"}
+
+    # Explicitly handle preflight OPTIONS (critical for browsers)
+    if event.get('requestContext', {}).get('http', {}).get('method') == 'OPTIONS':
+        response = {
+            "statusCode": 200,
+            "headers": base_headers,
+            "body": ""
+        }
+        return add_cors_headers(response)
 
     query_params = event.get('queryStringParameters') or {}
     body = {}
@@ -39,33 +54,35 @@ def lambda_handler(event, context):
 
     action = query_params.get('route') or query_params.get('action') or body.get('action', 'chat')
 
-    # --- ROUTE 1: AUTH ---
+    # AUTH ROUTE
     if action == 'auth':
         master_key = get_deepgram_key()
         if not master_key:
-            return {
+            response = {
                 "statusCode": 500,
-                "headers": headers,
+                "headers": base_headers,
                 "body": json.dumps({"error": "API Key not configured in Secrets Manager"})
             }
+        else:
+            response = {
+                "statusCode": 200,
+                "headers": base_headers,
+                "body": json.dumps({"key": master_key})
+            }
+        return add_cors_headers(response)
 
-        return {
-            "statusCode": 200,
-            "headers": headers,
-            "body": json.dumps({"key": master_key})
-        }
-
-    # --- ROUTE 2: CHAT (With Sentiment) ---
+    # CHAT ROUTE
     user_text = body.get('text', '').strip()
     user_sentiment = body.get('sentiment', 'neutral')
     session_id = body.get('session_id', 'demo_session')
 
     if not user_text:
-        return {
+        response = {
             "statusCode": 400,
-            "headers": headers,
+            "headers": base_headers,
             "body": json.dumps({"error": "No text provided"})
         }
+        return add_cors_headers(response)
 
     prompt = f"""
     User Input: "{user_text}"
@@ -87,18 +104,17 @@ def lambda_handler(event, context):
     }
 
     try:
-        response = bedrock.invoke_model(
+        response_bedrock = bedrock.invoke_model(
             modelId='anthropic.claude-3-haiku-20240307-v1:0',
             body=json.dumps(payload)
         )
-        result = json.loads(response['body'].read())
+        result = json.loads(response_bedrock['body'].read())
         ai_text = result['content'][0]['text'].strip()
 
-        # Optional: Log to DynamoDB
+        # Optional DynamoDB log
         table_name = os.environ.get('TABLE_NAME')
         if table_name:
-            table = dynamodb.Table(table_name)
-            table.put_item(Item={
+            dynamodb.Table(table_name).put_item(Item={
                 'session_id': session_id,
                 'timestamp': datetime.now().isoformat(),
                 'user': user_text,
@@ -106,16 +122,18 @@ def lambda_handler(event, context):
                 'ai': ai_text
             })
 
-        return {
+        response = {
             "statusCode": 200,
-            "headers": headers,
+            "headers": base_headers,
             "body": json.dumps({"response": ai_text})
         }
 
     except Exception as e:
         print(f"Bedrock Error: {e}")
-        return {
+        response = {
             "statusCode": 500,
-            "headers": headers,
+            "headers": base_headers,
             "body": json.dumps({"error": str(e)})
         }
+
+    return add_cors_headers(response)
