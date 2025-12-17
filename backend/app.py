@@ -8,15 +8,6 @@ bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
 secrets = boto3.client("secretsmanager")
 
 
-def cors_headers():
-    return {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "https://deepgram.lesuto.com",
-        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"
-    }
-
-
 def get_deepgram_key():
     try:
         secret_arn = os.environ.get("SECRETS_ARN")
@@ -31,15 +22,6 @@ def get_deepgram_key():
 
 
 def lambda_handler(event, context):
-    method = event.get("requestContext", {}).get("http", {}).get("method")
-
-    if method == "OPTIONS":
-        return {
-            "statusCode": 200,
-            "headers": cors_headers(),
-            "body": ""
-        }
-
     query_params = event.get("queryStringParameters") or {}
 
     body = {}
@@ -47,7 +29,7 @@ def lambda_handler(event, context):
         try:
             body = json.loads(event["body"])
         except Exception:
-            pass
+            body = {}
 
     action = (
         query_params.get("route")
@@ -61,13 +43,17 @@ def lambda_handler(event, context):
         if not api_key:
             return {
                 "statusCode": 500,
-                "headers": cors_headers(),
+                "headers": {
+                    "Content-Type": "application/json"
+                },
                 "body": json.dumps({"error": "Deepgram key missing"})
             }
 
         return {
             "statusCode": 200,
-            "headers": cors_headers(),
+            "headers": {
+                "Content-Type": "application/json"
+            },
             "body": json.dumps({"key": api_key})
         }
 
@@ -79,7 +65,9 @@ def lambda_handler(event, context):
     if not user_text:
         return {
             "statusCode": 400,
-            "headers": cors_headers(),
+            "headers": {
+                "Content-Type": "application/json"
+            },
             "body": json.dumps({"error": "No text"})
         }
 
@@ -93,7 +81,9 @@ def lambda_handler(event, context):
     payload = {
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 120,
-        "messages": [{"role": "user", "content": prompt}]
+        "messages": [
+            {"role": "user", "content": prompt}
+        ]
     }
 
     try:
@@ -119,7 +109,9 @@ def lambda_handler(event, context):
 
         return {
             "statusCode": 200,
-            "headers": cors_headers(),
+            "headers": {
+                "Content-Type": "application/json"
+            },
             "body": json.dumps({"response": ai_text})
         }
 
@@ -127,6 +119,8 @@ def lambda_handler(event, context):
         print("Bedrock error:", e)
         return {
             "statusCode": 500,
-            "headers": cors_headers(),
+            "headers": {
+                "Content-Type": "application/json"
+            },
             "body": json.dumps({"error": "Model failure"})
         }
