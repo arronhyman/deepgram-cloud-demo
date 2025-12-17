@@ -1,7 +1,6 @@
 import json
 import os
 import boto3
-import requests
 from datetime import datetime
 
 # Initialize AWS Services
@@ -10,9 +9,10 @@ bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')
 secrets = boto3.client('secretsmanager')
 
 def get_deepgram_key():
-    # Fetch from Secrets Manager to be secure
     try:
         secret_arn = os.environ.get('SECRETS_ARN')
+        if not secret_arn:
+            return None
         response = secrets.get_secret_value(SecretId=secret_arn)
         return json.loads(response['SecretString'])['api_key']
     except Exception as e:
@@ -20,48 +20,59 @@ def get_deepgram_key():
         return None
 
 def lambda_handler(event, context):
-    # Determine which "route" was hit
-    # Function URLs don't have paths like API Gateway, so we use query params or body
-    # Simple convention: POST with {"action": "auth"} or {"action": "chat"}
-    
-    body = json.loads(event.get('body', '{}'))
-    action = body.get('action', 'chat')
-    
     headers = {
         "Content-Type": "application/json",
-        # CORS is handled by FunctionUrlConfig, but good to have explicit just in case
-        "Access-Control-Allow-Origin": "*" 
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
     }
 
-    # --- ROUTE 1: AUTH (Get Temp Key) ---
+    # 1. Handle CORS Preflight
+    if event.get('requestContext', {}).get('http', {}).get('method') == 'OPTIONS':
+        return {"statusCode": 200, "headers": headers}
+
+    # 2. Parse Inputs (Query Params OR Body)
+    query_params = event.get('queryStringParameters') or {}
+    
+    # Try to parse body safely
+    body = {}
+    if event.get('body'):
+        try:
+            body = json.loads(event.get('body'))
+        except:
+            pass
+
+    # Determine Action: Check URL first (?route=auth), then Body ({action: 'auth'})
+    action = query_params.get('route') or query_params.get('action') or body.get('action', 'chat')
+
+    # --- ROUTE 1: AUTH ---
     if action == 'auth':
         master_key = get_deepgram_key()
         if not master_key or "PLACEHOLDER" in master_key:
-            return {"statusCode": 500, "body": json.dumps({"error": "API Key not configured in Secrets Manager"})}
-
-        # Create a temporary key that expires in 10 seconds (just enough to connect)
-        # We call Deepgram API to generate this "Scope Down" key
-        dg_url = "https://api.deepgram.com/v1/projects/YOUR_PROJECT_ID/keys" 
-        # Note: Finding Project ID dynamically is hard, usually easier to use a "standard" key 
-        # with a Referer check. For this Demo, we will return the Master Key BUT 
-        # in a real interview, say: "In prod, I'd generate a scoped temp key here."
-        
+            return {
+                "statusCode": 500, 
+                "headers": headers,
+                "body": json.dumps({"error": "API Key not configured in Secrets Manager"})
+            }
+            
         return {
-            "statusCode": 200, 
+            "statusCode": 200,
             "headers": headers,
             "body": json.dumps({"key": master_key})
         }
 
-    # --- ROUTE 2: CHAT (Bedrock) ---
+    # --- ROUTE 2: CHAT ---
     user_text = body.get('text', '')
     session_id = body.get('session_id', 'demo_session')
     
     if not user_text:
-        return {"statusCode": 400, "body": json.dumps({"error": "No text"})}
+        return {
+            "statusCode": 400, 
+            "headers": headers, 
+            "body": json.dumps({"error": "No text provided"})
+        }
 
     # Call Claude 3 Haiku
     prompt = f"User: {user_text}\n\nYou are a helpful support assistant. Answer in 1 short sentence."
-    
     payload = {
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 100,
@@ -76,7 +87,7 @@ def lambda_handler(event, context):
         result = json.loads(response['body'].read())
         ai_text = result['content'][0]['text']
         
-        # Log to DynamoDB
+        # Log to DynamoDB (if table exists)
         table_name = os.environ.get('TABLE_NAME')
         if table_name:
             dynamodb.Table(table_name).put_item(Item={
@@ -94,4 +105,8 @@ def lambda_handler(event, context):
         
     except Exception as e:
         print(f"Error: {str(e)}")
-        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
+        return {
+            "statusCode": 500, 
+            "headers": headers, 
+            "body": json.dumps({"error": str(e)})
+        }
