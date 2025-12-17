@@ -140,12 +140,13 @@ async function handleAIResponse(text) {
    STREAMING TTS
 ---------------------------- */
 function speakStreaming(text) {
-  if (!isActive) return;
+  if (!deepgramKey) return;
 
   const ttsUrl =
     "wss://api.deepgram.com/v1/speak" +
     "?model=aura-asteria-en" +
-    "&encoding=opus";
+    "&encoding=opus" +
+    "&container=webm";
 
   const audio = document.createElement("audio");
   audio.autoplay = true;
@@ -173,7 +174,10 @@ function speakStreaming(text) {
 
     socket.onclose = () => {
       mediaSource.endOfStream();
-      if (isActive) startSTT(); // resume listening immediately
+    };
+
+    socket.onerror = (e) => {
+      console.error("TTS socket error", e);
     };
   });
 }
