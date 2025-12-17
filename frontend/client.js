@@ -4,6 +4,9 @@ const API_URL = "https://sapucalvhlquhnlmlerjslz7se0gmbto.lambda-url.us-east-1.o
 let socket;
 let mediaRecorder;
 let deepgramKey; 
+let isSpeaking = false;
+let currentAudio = null;
+
 
 document.getElementById('micBtn').addEventListener('click', async () => {
     const btn = document.getElementById('micBtn');
@@ -107,26 +110,41 @@ document.getElementById('micBtn').addEventListener('click', async () => {
 
 // TTS Function
 async function speakWithDeepgram(text) {
-    if (!deepgramKey) return;
-    
-    // Aura model: aura-asteria-en (Female) or aura-orion-en (Male)
-    const url = "https://api.deepgram.com/v1/speak?model=aura-asteria-en";
-    
+    if (!deepgramKey || isSpeaking) return;
+
+    isSpeaking = true;
+
+    if (currentAudio) {
+        currentAudio.pause();
+        currentAudio = null;
+    }
+
     try {
-        const response = await fetch(url, {
-            method: "POST",
-            headers: {
-                "Authorization": `Token ${deepgramKey}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({ text: text })
-        });
+        const response = await fetch(
+            "https://api.deepgram.com/v1/speak?model=aura-asteria-en",
+            {
+                method: "POST",
+                headers: {
+                    "Authorization": `Token ${deepgramKey}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ text })
+            }
+        );
 
         const blob = await response.blob();
         const audioUrl = URL.createObjectURL(blob);
-        const audio = new Audio(audioUrl);
-        audio.play();
+
+        currentAudio = new Audio(audioUrl);
+        currentAudio.play();
+
+        currentAudio.onended = () => {
+            isSpeaking = false;
+            URL.revokeObjectURL(audioUrl);
+        };
+
     } catch (e) {
         console.error("TTS Error:", e);
+        isSpeaking = false;
     }
 }
