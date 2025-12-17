@@ -109,7 +109,6 @@ document.getElementById('micBtn').addEventListener('click', async () => {
 async function speakWithDeepgram(text) {
     if (!deepgramKey) return;
     
-    // Aura model: aura-asteria-en (Female) or aura-orion-en (Male)
     const url = "https://api.deepgram.com/v1/speak?model=aura-asteria-en";
     
     try {
@@ -119,13 +118,39 @@ async function speakWithDeepgram(text) {
                 "Authorization": `Token ${deepgramKey}`,
                 "Content-Type": "application/json"
             },
-            body: JSON.stringify({ text: text })
+            body: JSON.stringify({ text })
         });
 
-        const blob = await response.blob();
-        const audioUrl = URL.createObjectURL(blob);
-        const audio = new Audio(audioUrl);
-        audio.play();
+        if (!response.ok || !response.body) {
+            console.error("TTS fetch failed");
+            return;
+        }
+
+        // Set up Web Audio API
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const reader = response.body.getReader();
+        let chunks = [];
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+
+            // Optional: Start decoding/playback early after first few chunks
+            // But for simplicity, collect all then play (still faster than blob)
+        }
+
+        const fullBlob = new Blob(chunks, { type: 'audio/mpeg' }); // or 'audio/wav' if you change encoding
+
+        // Decode and play (this is fast once data is here)
+        const arrayBuffer = await fullBlob.arrayBuffer();
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+        source.start(0);
+
     } catch (e) {
         console.error("TTS Error:", e);
     }

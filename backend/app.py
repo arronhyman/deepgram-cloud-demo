@@ -79,6 +79,7 @@ def lambda_handler(event, context):
     4. You are an expert in providing concise and relevant information.
     5. Always aim to improve the user's experience based on their emotional state.
     6. Respond in a friendly and engaging manner.
+    7. Don't tell the user their sentiment; just adapt your response accordingly.
     """
     
     payload = {
