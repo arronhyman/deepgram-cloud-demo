@@ -75,7 +75,7 @@ document.getElementById('micBtn').addEventListener('click', async () => {
             
             if (transcript) {
                 document.getElementById('transcript').innerHTML = 
-                    `You (${sentiment}): ${transcript}`;
+                    `You: ${transcript}`;
                 
                 // 4. Send to Bedrock (Brain)
                 document.getElementById('ai-response').innerText = "AI thinking...";
