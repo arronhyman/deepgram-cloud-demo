@@ -2,29 +2,19 @@ const micBtn = document.getElementById("micBtn");
 const transcriptDiv = document.getElementById("transcript");
 const aiResponseDiv = document.getElementById("ai-response");
 
-const LAMBDA_URL =
-  "https://sapucalvhlquhnlmlerjslz7se0gmbto.lambda-url.us-east-1.on.aws";
-
 let deepgramKey = null;
 let sttSocket = null;
-let mediaRecorder = null;
-
 let ttsSocket = null;
+
 let audioContext = null;
 let audioQueue = [];
 let isPlaying = false;
 
-let isActive = false;
+const LAMBDA_URL =
+  "https://sapucalvhlquhnlmlerjslz7se0gmbto.lambda-url.us-east-1.on.aws";
 
 /* ---------------------------
-   INIT UI STATE
----------------------------- */
-transcriptDiv.innerText = "";
-aiResponseDiv.innerText = "";
-micBtn.innerText = "Start Demo";
-
-/* ---------------------------
-   FETCH DEEPGRAM KEY
+   FETCH DEEPGRAM API KEY
 ---------------------------- */
 async function fetchDeepgramKey() {
   const res = await fetch(`${LAMBDA_URL}?route=auth`);
@@ -33,60 +23,22 @@ async function fetchDeepgramKey() {
 }
 
 /* ---------------------------
-   START SESSION
+   START MICROPHONE + STT
 ---------------------------- */
-async function startSession() {
-  if (isActive) return;
-  isActive = true;
-
-  micBtn.innerText = "Stop";
-  transcriptDiv.innerText = "Listening...";
-  aiResponseDiv.innerText = "";
-
+async function startListening() {
   if (!deepgramKey) {
     await fetchDeepgramKey();
   }
 
-  startSTT();
-}
-
-/* ---------------------------
-   STOP SESSION
----------------------------- */
-function stopSession() {
-  isActive = false;
-
-  micBtn.innerText = "Start Demo";
-  transcriptDiv.innerText = "Session ended.";
-
-  if (mediaRecorder && mediaRecorder.state !== "inactive") {
-    mediaRecorder.stop();
-  }
-
-  if (sttSocket) {
-    sttSocket.close();
-    sttSocket = null;
-  }
-
-  if (ttsSocket) {
-    ttsSocket.close();
-    ttsSocket = null;
-  }
-
-  audioQueue = [];
-  isPlaying = false;
-}
-
-/* ---------------------------
-   STT (MIC → TEXT)
----------------------------- */
-async function startSTT() {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+  const mediaRecorder = new MediaRecorder(stream, {
+    mimeType: "audio/webm",
+  });
 
   const sttUrl =
     "wss://api.deepgram.com/v1/listen" +
     "?model=nova-2" +
+    "&language=en-US" +
     "&interim_results=true" +
     "&endpointing=300";
 
@@ -109,6 +61,7 @@ async function startSTT() {
 
     transcriptDiv.innerText = alt.transcript;
 
+    // Only act on FINAL transcripts
     if (!data.is_final) return;
 
     mediaRecorder.stop();
@@ -119,7 +72,7 @@ async function startSTT() {
 }
 
 /* ---------------------------
-   AI CALL
+   CALL LAMBDA (AI RESPONSE)
 ---------------------------- */
 async function handleAIResponse(text) {
   aiResponseDiv.innerText = "Thinking...";
@@ -127,7 +80,11 @@ async function handleAIResponse(text) {
   const res = await fetch(LAMBDA_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({
+      action: "chat",
+      text,
+      session_id: "demo",
+    }),
   });
 
   const data = await res.json();
@@ -137,53 +94,54 @@ async function handleAIResponse(text) {
 }
 
 /* ---------------------------
-   STREAMING TTS
+   STREAMING TTS (FIXES LAG)
 ---------------------------- */
 function speakStreaming(text) {
-  if (!deepgramKey) return;
+  if (!deepgramKey || !text) return;
+
+  // Kill previous speech immediately
+  if (ttsSocket) {
+    ttsSocket.close();
+    ttsSocket = null;
+  }
+
+  if (!audioContext) {
+    audioContext = new AudioContext();
+  }
+
+  audioQueue = [];
+  isPlaying = false;
 
   const ttsUrl =
     "wss://api.deepgram.com/v1/speak" +
     "?model=aura-asteria-en" +
-    "&encoding=opus" +
-    "&container=webm";
+    "&encoding=linear16" +
+    "&sample_rate=16000";
 
-  const audio = document.createElement("audio");
-  audio.autoplay = true;
+  ttsSocket = new WebSocket(ttsUrl, ["token", deepgramKey]);
+  ttsSocket.binaryType = "arraybuffer";
 
-  const mediaSource = new MediaSource();
-  audio.src = URL.createObjectURL(mediaSource);
+  ttsSocket.onopen = () => {
+    ttsSocket.send(JSON.stringify({ text }));
+  };
 
-  mediaSource.addEventListener("sourceopen", () => {
-    const sourceBuffer = mediaSource.addSourceBuffer(
-      'audio/webm; codecs="opus"'
-    );
+  ttsSocket.onmessage = async (event) => {
+    if (!(event.data instanceof ArrayBuffer)) return;
+    audioQueue.push(event.data);
+    if (!isPlaying) playAudioQueue();
+  };
 
-    const socket = new WebSocket(ttsUrl, ["token", deepgramKey]);
-    socket.binaryType = "arraybuffer";
+  ttsSocket.onclose = () => {
+    ttsSocket = null;
+  };
 
-    socket.onopen = () => {
-      socket.send(JSON.stringify({ text }));
-    };
-
-    socket.onmessage = (event) => {
-      if (event.data instanceof ArrayBuffer) {
-        sourceBuffer.appendBuffer(event.data);
-      }
-    };
-
-    socket.onclose = () => {
-      mediaSource.endOfStream();
-    };
-
-    socket.onerror = (e) => {
-      console.error("TTS socket error", e);
-    };
-  });
+  ttsSocket.onerror = (e) => {
+    console.error("TTS error", e);
+  };
 }
 
 /* ---------------------------
-   AUDIO PIPELINE
+   AUDIO PLAYBACK PIPELINE
 ---------------------------- */
 async function playAudioQueue() {
   if (audioQueue.length === 0) {
@@ -194,30 +152,37 @@ async function playAudioQueue() {
   isPlaying = true;
 
   const chunk = audioQueue.shift();
-  const wav = pcm16ToWav(chunk);
-  const buffer = await audioContext.decodeAudioData(wav);
+  const wavBuffer = pcm16ToWav(chunk);
 
+  const audioBuffer = await audioContext.decodeAudioData(wavBuffer);
   const source = audioContext.createBufferSource();
-  source.buffer = buffer;
+  source.buffer = audioBuffer;
   source.connect(audioContext.destination);
   source.start();
 
-  source.onended = playAudioQueue;
+  source.onended = () => {
+    playAudioQueue();
+  };
 }
 
 /* ---------------------------
-   PCM → WAV
+   PCM → WAV CONVERTER
 ---------------------------- */
-function pcm16ToWav(pcm) {
-  const pcm16 = new Int16Array(pcm);
+function pcm16ToWav(pcmData) {
+  const pcm16 = new Int16Array(pcmData);
   const buffer = new ArrayBuffer(44 + pcm16.length * 2);
   const view = new DataView(buffer);
 
-  const write = (o, s) => [...s].forEach((c, i) => view.setUint8(o + i, c.charCodeAt(0)));
+  function writeStr(o, s) {
+    for (let i = 0; i < s.length; i++) {
+      view.setUint8(o + i, s.charCodeAt(i));
+    }
+  }
 
-  write(0, "RIFF");
+  writeStr(0, "RIFF");
   view.setUint32(4, 36 + pcm16.length * 2, true);
-  write(8, "WAVEfmt ");
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
   view.setUint32(16, 16, true);
   view.setUint16(20, 1, true);
   view.setUint16(22, 1, true);
@@ -225,7 +190,7 @@ function pcm16ToWav(pcm) {
   view.setUint32(28, 32000, true);
   view.setUint16(32, 2, true);
   view.setUint16(34, 16, true);
-  write(36, "data");
+  writeStr(36, "data");
   view.setUint32(40, pcm16.length * 2, true);
 
   let offset = 44;
@@ -237,8 +202,10 @@ function pcm16ToWav(pcm) {
 }
 
 /* ---------------------------
-   BUTTON
+   UI
 ---------------------------- */
 micBtn.onclick = () => {
-  isActive ? stopSession() : startSession();
+  transcriptDiv.innerText = "Listening...";
+  aiResponseDiv.innerText = "";
+  startListening();
 };
