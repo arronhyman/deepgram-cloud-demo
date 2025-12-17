@@ -22,8 +22,6 @@ def get_deepgram_key():
 def lambda_handler(event, context):
     headers = {
         "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",  # Add if needed for CORS
-        "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
     }
 
     # Handle CORS Preflight
