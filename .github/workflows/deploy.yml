@@ -1,0 +1,28 @@
+name: Deploy Cloud Demo
+on: [push]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with: { python-version: '3.9' }
+      - uses: aws-actions/setup-sam@v2
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - run: sam build
+      - run: |
+          sam deploy --no-confirm-changeset --no-fail-on-empty-changeset \
+          --stack-name deepgram-cloud-demo \
+          --resolve-s3 --capabilities CAPABILITY_IAM \
+          --parameter-overrides DomainName=deepgram.lesuto.com HostedZoneId=YOUR_HOSTED_ZONE_ID
+
+      # Sync Frontend to the S3 bucket created by SAM
+      - name: Sync S3
+        run: |
+          BUCKET_NAME=$(aws cloudformation describe-stacks --stack-name deepgram-cloud-demo --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" --output text)
+          aws s3 sync ./frontend s3://$BUCKET_NAME --delete
