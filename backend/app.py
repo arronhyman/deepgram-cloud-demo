@@ -1,126 +1,82 @@
 import json
 import os
 import boto3
-from datetime import datetime
 
-dynamodb = boto3.resource("dynamodb")
-bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+# Initialize clients
 secrets = boto3.client("secretsmanager")
-
+bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
 
 def get_deepgram_key():
     try:
-        secret_arn = os.environ.get("SECRETS_ARN")
+        # Replace with your actual secret logic
+        secret_arn = os.environ.get("SECRETS_ARN") 
         if not secret_arn:
             return None
-
         response = secrets.get_secret_value(SecretId=secret_arn)
         return json.loads(response["SecretString"]).get("api_key")
     except Exception as e:
-        print("Secret error:", e)
+        print(f"Secret Error: {e}")
         return None
 
-
 def lambda_handler(event, context):
+    """
+    Ensure Lambda Function URL Invoke Mode is set to RESPONSE_STREAM
+    """
+    
+    # 1. HANDLE AUTH REQUEST (Standard JSON response)
     query_params = event.get("queryStringParameters") or {}
-
-    body = {}
-    if event.get("body"):
-        try:
-            body = json.loads(event["body"])
-        except Exception:
-            body = {}
-
-    action = (
-        query_params.get("route")
-        or body.get("action", "chat")
-    )
-
-    # ---------- AUTH ----------
-    if action == "auth":
-        api_key = get_deepgram_key()
-
-        if not api_key:
-            return {
-                "statusCode": 500,
-                "headers": {
-                    "Content-Type": "application/json"
-                },
-                "body": json.dumps({"error": "Deepgram key missing"})
-            }
-
+    if query_params.get("route") == "auth":
+        key = get_deepgram_key()
         return {
             "statusCode": 200,
-            "headers": {
-                "Content-Type": "application/json"
-            },
-            "body": json.dumps({"key": api_key})
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"key": key})
         }
 
-    # ---------- CHAT ----------
-    user_text = body.get("text")
-    sentiment = body.get("sentiment", "neutral")
-    session_id = body.get("session_id", "demo")
+    # 2. PARSE INPUT
+    try:
+        body = json.loads(event.get("body", "{}"))
+        user_text = body.get("text", "")
+    except:
+        user_text = ""
 
     if not user_text:
-        return {
-            "statusCode": 400,
-            "headers": {
-                "Content-Type": "application/json"
-            },
-            "body": json.dumps({"error": "No text"})
-        }
+        return {"statusCode": 400, "body": "No text provided"}
 
-    prompt = (
-        f'User Input: "{user_text}"\n'
-        f"Detected Sentiment: {sentiment}\n\n"
-        "You are a helpful voice assistant.\n"
-        "Respond in 1–2 short sentences.\n"
-    )
-
+    # 3. PREPARE BEDROCK STREAM
+    prompt = f"User: {user_text}\n\nAssistant: (Respond in 1 sentence)"
+    
     payload = {
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 120,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
+        "max_tokens": 150,
+        "messages": [{"role": "user", "content": prompt}]
     }
 
     try:
-        response = bedrock.invoke_model(
+        # Call Bedrock with Streaming
+        response = bedrock.invoke_model_with_response_stream(
             modelId="anthropic.claude-3-haiku-20240307-v1:0",
             body=json.dumps(payload)
         )
+        stream = response.get('body')
+        
+        # 4. GENERATOR FUNCTION
+        # This yields chunks of text as they come from the model
+        def response_stream():
+            if stream:
+                for event in stream:
+                    chunk = event.get('chunk')
+                    if chunk:
+                        chunk_json = json.loads(chunk.get('bytes').decode())
+                        
+                        # Anthropic Delta Format
+                        if chunk_json.get('type') == 'content_block_delta':
+                            text_delta = chunk_json['delta']['text']
+                            # Yield plain text chunk
+                            yield text_delta
 
-        result = json.loads(response["body"].read())
-        ai_text = result["content"][0]["text"]
-
-        table_name = os.environ.get("TABLE_NAME")
-        if table_name:
-            dynamodb.Table(table_name).put_item(
-                Item={
-                    "session_id": session_id,
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "user": user_text,
-                    "sentiment": sentiment,
-                    "ai": ai_text
-                }
-            )
-
-        return {
-            "statusCode": 200,
-            "headers": {
-                "Content-Type": "application/json"
-            },
-            "body": json.dumps({"response": ai_text})
-        }
+        return response_stream()
 
     except Exception as e:
-        print("Bedrock error:", e)
-        return {
-            "statusCode": 500,
-            "headers": {
-                "Content-Type": "application/json"
-            },
-            "body": json.dumps({"error": "Model failure"})
-        }
+        print(f"Bedrock Error: {e}")
+        return {"statusCode": 500, "body": "AI Error"}
