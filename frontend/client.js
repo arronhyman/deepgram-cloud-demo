@@ -4,8 +4,9 @@ const API_URL = "https://sapucalvhlquhnlmlerjslz7se0gmbto.lambda-url.us-east-1.o
 let socket;
 let mediaRecorder;
 let deepgramKey;
+let ttsSocket = null;
+let ttsAudioContext = null;
 let isSpeaking = false;
-let currentAudio = null 
 
 document.getElementById('micBtn').addEventListener('click', async () => {
     const btn = document.getElementById('micBtn');
@@ -109,53 +110,48 @@ document.getElementById('micBtn').addEventListener('click', async () => {
 
 // TTS Function
 async function speakWithDeepgram(text) {
-    if (!deepgramKey || isSpeaking) return;  // Prevent new speech if already speaking
+    if (!deepgramKey || isSpeaking) return;  // Prevent overlap
     
     isSpeaking = true;
-    document.getElementById('ai-response').innerText = `AI (speaking): ${text}`;  // Optional visual cue
-    
-    const url = "https://api.deepgram.com/v1/speak?model=aura-asteria-en";
-    
-    try {
-        const response = await fetch(url, {
-            method: "POST",
-            headers: {
-                "Authorization": `Token ${deepgramKey}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({ text })
-        });
+    document.getElementById('ai-response').innerText = `AI (speaking): ${text}`;
+
+    // Close any old socket
+    if (ttsSocket) ttsSocket.close();
+
+    ttsSocket = new WebSocket(
+        `wss://api.deepgram.com/v1/speak?model=aura-asteria-en`,
+        ['token', deepgramKey]
+    );
+
+    ttsAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+    ttsSocket.onopen = () => {
+        // Send the full text (for short responses, this is fine)
+        ttsSocket.send(JSON.stringify({ type: 'Speak', text }));
         
-        if (!response.ok || !response.body) throw new Error("TTS failed");
-        
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        const reader = response.body.getReader();
-        const chunks = [];
-        
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
+        // Optional: Flush to force immediate processing
+        ttsSocket.send(JSON.stringify({ type: 'Flush' }));
+    };
+
+    ttsSocket.onmessage = async (event) => {
+        if (event.data instanceof Blob) {
+            const arrayBuffer = await event.data.arrayBuffer();
+            const audioBuffer = await ttsAudioContext.decodeAudioData(arrayBuffer);
+            
+            const source = ttsAudioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(ttsAudioContext.destination);
+            source.start(0);
         }
-        
-        const blob = new Blob(chunks, { type: 'audio/mpeg' });  // Deepgram REST defaults to MP3
-        const arrayBuffer = await blob.arrayBuffer();
-        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-        
-        const source = audioContext.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(audioContext.destination);
-        
-        // Optional: Allow barge-in (stop current if user speaks)
-        source.onended = () => {
-            isSpeaking = false;
-        };
-        
-        source.start(0);
-        currentAudio = source;  // If you want to stop mid-playback
-        
-    } catch (e) {
-        console.error("TTS Error:", e);
+    };
+
+    ttsSocket.onclose = () => {
         isSpeaking = false;
-    }
+        if (ttsAudioContext) ttsAudioContext.close();
+    };
+
+    ttsSocket.onerror = (err) => {
+        console.error('TTS WS Error:', err);
+        isSpeaking = false;
+    };
 }
