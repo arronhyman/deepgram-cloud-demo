@@ -10,7 +10,7 @@ secrets = boto3.client('secretsmanager')
 
 def get_deepgram_key():
     try:
-        secret_arn = os.environ.get('SECRETS_ARN') 
+        secret_arn = os.environ.get('SECRETS_ARN')
         if not secret_arn:
             return None
         response = secrets.get_secret_value(SecretId=secret_arn)
@@ -20,53 +20,58 @@ def get_deepgram_key():
         return None
 
 def lambda_handler(event, context):
+    # Only Content-Type header — let AWS Function URL handle all CORS headers
     headers = {
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     }
 
-    # Handle CORS Preflight
-    if event.get('requestContext', {}).get('http', {}).get('method') == 'OPTIONS':
-        return {"statusCode": 200, "headers": headers}
+    # REMOVED: Manual OPTIONS handling
+    # AWS will now automatically respond to preflight OPTIONS with proper CORS headers
+    # because CORS is enabled in the Function URL configuration
 
     query_params = event.get('queryStringParameters') or {}
     body = {}
     if event.get('body'):
         try:
-            body = json.loads(event.get('body'))
+            body = json.loads(event.get('body') or '{}')
         except:
             pass
 
     action = query_params.get('route') or query_params.get('action') or body.get('action', 'chat')
 
-    # AUTH ROUTE
+    # --- ROUTE 1: AUTH ---
     if action == 'auth':
         master_key = get_deepgram_key()
         if not master_key:
             return {
-                "statusCode": 500, 
-                "headers": headers, 
+                "statusCode": 500,
+                "headers": headers,
                 "body": json.dumps({"error": "API Key not configured in Secrets Manager"})
             }
-        
+
         return {
             "statusCode": 200,
             "headers": headers,
             "body": json.dumps({"key": master_key})
         }
 
-    # CHAT ROUTE
+    # --- ROUTE 2: CHAT (With Sentiment) ---
     user_text = body.get('text', '').strip()
-    user_sentiment = body.get('sentiment', 'neutral') 
+    user_sentiment = body.get('sentiment', 'neutral')
     session_id = body.get('session_id', 'demo_session')
-    
+
     if not user_text:
-        return {"statusCode": 400, "headers": headers, "body": json.dumps({"error": "No text"})}
+        return {
+            "statusCode": 400,
+            "headers": headers,
+            "body": json.dumps({"error": "No text provided"})
+        }
 
     prompt = f"""
     User Input: "{user_text}"
     Detected Sentiment: {user_sentiment}
-    
-    You are a helpful voice assistant. 
+
+    You are a helpful voice assistant.
     1. Answer the user's input clearly.
     2. Adjust your tone based on the detected sentiment (e.g., if they are frustrated, be empathetic).
     3. Keep your response short (max 2 sentences) because it will be spoken out loud.
@@ -80,18 +85,20 @@ def lambda_handler(event, context):
         "max_tokens": 150,
         "messages": [{"role": "user", "content": prompt}]
     }
-    
+
     try:
         response = bedrock.invoke_model(
             modelId='anthropic.claude-3-haiku-20240307-v1:0',
             body=json.dumps(payload)
         )
         result = json.loads(response['body'].read())
-        ai_text = result['content'][0]['text']
-        
+        ai_text = result['content'][0]['text'].strip()
+
+        # Optional: Log to DynamoDB
         table_name = os.environ.get('TABLE_NAME')
         if table_name:
-            dynamodb.Table(table_name).put_item(Item={
+            table = dynamodb.Table(table_name)
+            table.put_item(Item={
                 'session_id': session_id,
                 'timestamp': datetime.now().isoformat(),
                 'user': user_text,
@@ -100,15 +107,15 @@ def lambda_handler(event, context):
             })
 
         return {
-            "statusCode": 200, 
-            "headers": headers, 
+            "statusCode": 200,
+            "headers": headers,
             "body": json.dumps({"response": ai_text})
         }
-        
+
     except Exception as e:
         print(f"Bedrock Error: {e}")
         return {
-            "statusCode": 500, 
-            "headers": headers, 
+            "statusCode": 500,
+            "headers": headers,
             "body": json.dumps({"error": str(e)})
         }
