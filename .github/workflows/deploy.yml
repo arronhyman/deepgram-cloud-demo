@@ -1,43 +1,29 @@
 name: Deploy Deepgram Cloud Demo
+
 on:
   push:
     branches: [ "main" ]
-  # Allows you to run this workflow manually from the Actions tab if needed
   workflow_dispatch:
 
 permissions:
-  id-token: write
   contents: read
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v3
-      
-      # 1. NEW STEP: Check which files were modified
-      - uses: dorny/paths-filter@v2
-        id: changes
-        with:
-          filters: |
-            infra:
-              - 'template.yaml'
-              - 'samconfig.toml'
-              - '**.py'     # Assuming your Lambda code is Python
-              - 'backend/**' # Adjust this if your code is in a specific folder
-            frontend:
-              - 'frontend/**'
 
-      - uses: actions/setup-python@v4
-        with: { python-version: '3.9' }
-      - uses: aws-actions/setup-sam@v2
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
-      - name: Sync Frontend to S3
-        if: steps.changes.outputs.frontend == 'true' || steps.changes.outputs.infra == 'true'
+      - name: Force upload frontend files to S3
         run: |
-          aws s3 sync ./frontend s3://deepgram-demo-frontend-551805034614 --delete
+          aws s3 sync ./frontend s3://deepgram-demo-frontend-551805034614 \
+            --delete \
+            --exact-timestamps \
+            --metadata-directive REPLACE
