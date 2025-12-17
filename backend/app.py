@@ -10,7 +10,6 @@ secrets = boto3.client('secretsmanager')
 
 def get_deepgram_key():
     try:
-        # Retrieves the ARN you defined in template.yaml
         secret_arn = os.environ.get('SECRETS_ARN') 
         if not secret_arn:
             return None
@@ -22,16 +21,16 @@ def get_deepgram_key():
 
 def lambda_handler(event, context):
     headers = {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",  # Add if needed for CORS
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
     }
 
-    # 1. Handle CORS Preflight
+    # Handle CORS Preflight
     if event.get('requestContext', {}).get('http', {}).get('method') == 'OPTIONS':
         return {"statusCode": 200, "headers": headers}
 
-    # 2. Parse Inputs (Query Params OR Body)
     query_params = event.get('queryStringParameters') or {}
-    
     body = {}
     if event.get('body'):
         try:
@@ -39,10 +38,9 @@ def lambda_handler(event, context):
         except:
             pass
 
-    # Determine Action
     action = query_params.get('route') or query_params.get('action') or body.get('action', 'chat')
 
-    # --- ROUTE 1: AUTH ---
+    # AUTH ROUTE
     if action == 'auth':
         master_key = get_deepgram_key()
         if not master_key:
@@ -52,22 +50,20 @@ def lambda_handler(event, context):
                 "body": json.dumps({"error": "API Key not configured in Secrets Manager"})
             }
         
-        # Return the key directly to the client
         return {
             "statusCode": 200,
             "headers": headers,
             "body": json.dumps({"key": master_key})
         }
 
-    # --- ROUTE 2: CHAT (With Sentiment) ---
-    user_text = body.get('text', '')
+    # CHAT ROUTE
+    user_text = body.get('text', '').strip()
     user_sentiment = body.get('sentiment', 'neutral') 
     session_id = body.get('session_id', 'demo_session')
     
     if not user_text:
         return {"statusCode": 400, "headers": headers, "body": json.dumps({"error": "No text"})}
 
-    # Prompt Engineering with Sentiment
     prompt = f"""
     User Input: "{user_text}"
     Detected Sentiment: {user_sentiment}
@@ -79,9 +75,8 @@ def lambda_handler(event, context):
     4. You are an expert in providing concise and relevant information.
     5. Always aim to improve the user's experience based on their emotional state.
     6. Respond in a friendly and engaging manner.
-    7. Don't tell the user their sentiment; just adapt your response accordingly.
     """
-    
+
     payload = {
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 150,
@@ -96,7 +91,6 @@ def lambda_handler(event, context):
         result = json.loads(response['body'].read())
         ai_text = result['content'][0]['text']
         
-        # Log to DynamoDB
         table_name = os.environ.get('TABLE_NAME')
         if table_name:
             dynamodb.Table(table_name).put_item(Item={
