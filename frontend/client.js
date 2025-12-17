@@ -5,8 +5,7 @@ let mediaRecorder;
 let deepgramKey; 
 
 // STATE MANAGEMENT
-let isAiSpeaking = false;        // "Gate" to stop listening when AI talks
-let audioPlayPromise = Promise.resolve(); // The new "Timeline" for audio playback
+let isAiSpeaking = false; // "Gate" to stop listening when AI talks
 
 document.getElementById('micBtn').addEventListener('click', async () => {
     const btn = document.getElementById('micBtn');
@@ -43,7 +42,7 @@ document.getElementById('micBtn').addEventListener('click', async () => {
     mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
 
     // 3. Connect to Deepgram (STT)
-    // punctuate=true helps us parse sentences better if we were streaming text back
+    // punctuate=true helps us parse sentences better 
     const dgParams = "model=nova-2&smart_format=true&sentiment=true&punctuate=true&endpointing=300";
     socket = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, [
         'token', deepgramKey
@@ -103,9 +102,6 @@ function stopEverything() {
     
     // Reset flags
     isAiSpeaking = false;
-    // We cannot easily cancel promises, but the audio player checks 
-    // the 'isAiSpeaking' flag (in the stop logic context, we might want a separate flag or reload)
-    // ideally, you might reload the page or mute audio here.
 }
 
 // --- OPTIMIZED AI PROCESSING ---
@@ -122,18 +118,39 @@ async function handleAiProcessing(text, sentiment) {
         document.getElementById('ai-response').innerText = `AI: ${fullText}`;
         
         // 1. SPLIT TEXT INTO SENTENCES
-        // This regex splits by punctuation (. ! ?) but keeps the punctuation attached.
+        // This regex matches sentences ending in . ! or ?
+        // It handles cases where the last sentence might not have punctuation.
         const sentences = fullText.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [fullText];
 
-        // 2. PROCESS AUDIO PIPELINE
-        // We iterate through sentences and queue them up.
-        // Because 'queueAudio' handles the fetching asynchronously, 
-        // the network requests for sentence #2 start while sentence #1 is preparing to play.
-        for (const sentence of sentences) {
+        // 2. PARALLEL PRE-FETCHING (The Speed Fix)
+        // We trigger all Deepgram requests IMMEDIATELY using .map()
+        // We do NOT await them yet. This starts all downloads at t=0.
+        const audioPromises = sentences.map(sentence => {
             const trimmed = sentence.trim();
-            if (trimmed.length > 0) {
-                await queueAudio(trimmed);
+            if (trimmed.length === 0) return null;
+            return fetchDeepgramAudio(trimmed);
+        });
+
+        // 3. SEQUENTIAL PLAYBACK (The Cut-off Fix)
+        // We loop through the promises in order.
+        // Even though they are downloading in parallel, we play them one by one.
+        for (const promise of audioPromises) {
+            if (!promise) continue;
+            
+            // Wait for the specific sentence to finish downloading
+            const blob = await promise; 
+            
+            if (blob) {
+                // Wait for it to finish playing before starting the next loop iteration
+                await playAudioBlob(blob); 
             }
+        }
+        
+        // 4. ONLY NOW DO WE UNMUTE
+        // We are 100% sure the entire loop is finished.
+        if (document.getElementById('micBtn').classList.contains("active")) {
+            isAiSpeaking = false;
+            console.log("AI finished speaking. Mic open.");
         }
         
     } catch (e) {
@@ -142,71 +159,30 @@ async function handleAiProcessing(text, sentiment) {
     }
 }
 
-// --- PIPELINED AUDIO QUEUE SYSTEM ---
+// --- HELPER FUNCTIONS ---
 
-async function queueAudio(text) {
-    // A. Start fetching the audio IMMEDIATELY.
-    // We do not await this yet. We want the download to start NOW.
-    const audioBlobPromise = fetchDeepgramAudio(text);
-
-    // B. Schedule the playback.
-    // We chain this new playback to the end of the 'audioPlayPromise' timeline.
-    audioPlayPromise = audioPlayPromise
-        .then(async () => {
-            // Wait for the download to finish (if it hasn't already)
-            const blob = await audioBlobPromise; 
-            if (!blob) return;
-            
-            // Return a new promise that resolves only when this specific audio clip finishes playing
-            return new Promise((resolve) => {
-                // Double check user didn't hit stop
-                const btn = document.getElementById('micBtn');
-                if (!btn.classList.contains("active")) {
-                    resolve();
-                    return;
-                }
-
-                const audioUrl = URL.createObjectURL(blob);
-                const audio = new Audio(audioUrl);
-                
-                audio.onended = () => {
-                    resolve(); // This clip is done, ready for the next one
-                };
-                
-                audio.play().catch(e => {
-                    console.error("Play error", e);
-                    resolve(); // Skip if error
-                });
-            });
-        })
-        .finally(() => {
-            // This runs after the specific clip finishes. 
-            // We need a way to detect if the ENTIRE queue is empty to un-mute the mic.
-            // A simple hack: check if the queue is "caught up" after a tiny delay.
-            setTimeout(() => {
-                // If we are actively processing, we assume more links are in the chain.
-                // But since we can't easily inspect the Promise chain length, 
-                // we rely on the fact that handleAiProcessing loops await queueAudio.
-                // So we actually handle the "All Done" logic better in handleAiProcessing?
-                // No, because queueAudio returns before playback finishes.
-                
-                // Simple workaround: We leave isAiSpeaking = true.
-                // We only set it to false if we know for sure we are done.
-                // See step C below.
-            }, 50);
-        });
-
-    // C. Handle the "End of Conversation" logic
-    // We want to know when the VERY LAST audio finishes to open the mic.
-    // We can piggyback on the promise chain's current tail.
-    // Note: This logic runs every time we add a sentence, but it only "sticks" for the last one.
-    audioPlayPromise.then(() => {
-        // If this block runs, it means the audio queue is currently empty/finished.
+function playAudioBlob(blob) {
+    return new Promise((resolve) => {
+        // Double check user didn't hit stop in the middle
         const btn = document.getElementById('micBtn');
-        if (btn.classList.contains("active")) {
-            isAiSpeaking = false; // Open the mic
-            console.log("Mic Re-opened");
+        if (!btn.classList.contains("active")) {
+            resolve();
+            return;
         }
+
+        const audioUrl = URL.createObjectURL(blob);
+        const audio = new Audio(audioUrl);
+        
+        // Resolve the promise only when the audio ends
+        audio.onended = () => {
+            resolve(); 
+        };
+        
+        // If audio fails to play, resolve anyway so the loop continues
+        audio.play().catch(e => {
+            console.error("Play Error:", e);
+            resolve();
+        });
     });
 }
 
