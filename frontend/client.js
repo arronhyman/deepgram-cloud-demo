@@ -142,40 +142,40 @@ async function handleAIResponse(text) {
 function speakStreaming(text) {
   if (!isActive) return;
 
-  if (!audioContext) {
-    audioContext = new AudioContext();
-  }
-
-  audioQueue = [];
-  isPlaying = false;
-
   const ttsUrl =
     "wss://api.deepgram.com/v1/speak" +
     "?model=aura-asteria-en" +
-    "&encoding=linear16" +
-    "&sample_rate=16000";
+    "&encoding=opus";
 
-  ttsSocket = new WebSocket(ttsUrl, ["token", deepgramKey]);
-  ttsSocket.binaryType = "arraybuffer";
+  const audio = document.createElement("audio");
+  audio.autoplay = true;
 
-  ttsSocket.onopen = () => {
-    ttsSocket.send(JSON.stringify({ text }));
-  };
+  const mediaSource = new MediaSource();
+  audio.src = URL.createObjectURL(mediaSource);
 
-  ttsSocket.onmessage = (event) => {
-    if (event.data instanceof ArrayBuffer) {
-      audioQueue.push(event.data);
-      if (!isPlaying) playAudioQueue();
-    }
-  };
+  mediaSource.addEventListener("sourceopen", () => {
+    const sourceBuffer = mediaSource.addSourceBuffer(
+      'audio/webm; codecs="opus"'
+    );
 
-  ttsSocket.onclose = () => {
-    // Restart listening after speech ends
-    if (isActive) {
-      transcriptDiv.innerText = "Listening...";
-      startSTT();
-    }
-  };
+    const socket = new WebSocket(ttsUrl, ["token", deepgramKey]);
+    socket.binaryType = "arraybuffer";
+
+    socket.onopen = () => {
+      socket.send(JSON.stringify({ text }));
+    };
+
+    socket.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        sourceBuffer.appendBuffer(event.data);
+      }
+    };
+
+    socket.onclose = () => {
+      mediaSource.endOfStream();
+      if (isActive) startSTT(); // resume listening immediately
+    };
+  });
 }
 
 /* ---------------------------
