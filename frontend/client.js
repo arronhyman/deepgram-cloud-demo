@@ -142,38 +142,76 @@ async function handleAIResponse(text) {
 function speakStreaming(text) {
   if (!deepgramKey) return;
 
+  // 1. Authenticate via Query Params for Browser WebSockets
   const ttsUrl =
     "wss://api.deepgram.com/v1/speak" +
     "?model=aura-asteria-en" +
     "&encoding=opus" +
-    "&container=webm";
+    "&container=webm" +
+    "&token=" + deepgramKey; // <--- ADD KEY HERE
 
   const audio = document.createElement("audio");
   audio.autoplay = true;
 
   const mediaSource = new MediaSource();
   audio.src = URL.createObjectURL(mediaSource);
+  
+  // Append to DOM if you want to see controls, or just play in background
+  // document.body.appendChild(audio); 
 
   mediaSource.addEventListener("sourceopen", () => {
-    const sourceBuffer = mediaSource.addSourceBuffer(
-      'audio/webm; codecs="opus"'
-    );
+    const sourceBuffer = mediaSource.addSourceBuffer('audio/webm; codecs="opus"');
+    sourceBuffer.mode = 'sequence';
 
-    const socket = new WebSocket(ttsUrl, ["token", deepgramKey]);
+    // 2. Buffer Queue System (Prevents "updating" errors)
+    const audioQueue = [];
+    let isAppending = false;
+
+    function processQueue() {
+      if (!isAppending && audioQueue.length > 0 && !sourceBuffer.updating) {
+        isAppending = true;
+        const chunk = audioQueue.shift();
+        
+        try {
+          sourceBuffer.appendBuffer(chunk);
+        } catch (e) {
+          console.error("SourceBuffer error:", e);
+          isAppending = false;
+        }
+      }
+    }
+
+    sourceBuffer.addEventListener("updateend", () => {
+      isAppending = false;
+      processQueue();
+    });
+
+    // 3. Connect Socket (No subprotocol argument)
+    const socket = new WebSocket(ttsUrl); 
     socket.binaryType = "arraybuffer";
 
     socket.onopen = () => {
+      // Send the text to Deepgram
       socket.send(JSON.stringify({ text }));
     };
 
     socket.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
-        sourceBuffer.appendBuffer(event.data);
+        audioQueue.push(event.data);
+        processQueue();
       }
     };
 
     socket.onclose = () => {
-      mediaSource.endOfStream();
+      // Wait for queue to empty before ending stream
+      const checkEnd = setInterval(() => {
+        if (audioQueue.length === 0 && !sourceBuffer.updating) {
+          clearInterval(checkEnd);
+          if (mediaSource.readyState === "open") {
+            mediaSource.endOfStream();
+          }
+        }
+      }, 100);
     };
 
     socket.onerror = (e) => {
