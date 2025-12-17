@@ -2,6 +2,7 @@ name: Deploy Deepgram Cloud Demo
 on:
   push:
     branches: [ "main" ]
+  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -12,6 +13,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+      
+      # 1. Check which files were modified
+      - uses: dorny/paths-filter@v2
+        id: changes
+        with:
+          filters: |
+            infra:
+              - 'template.yaml'
+              - 'samconfig.toml'
+              - '**.py'
+              - 'backend/**'
+            frontend:
+              - 'frontend/**'
+
       - uses: actions/setup-python@v4
         with: { python-version: '3.9' }
       - uses: aws-actions/setup-sam@v2
@@ -21,19 +36,35 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
+      # 2. Build (Only if infra changed)
       - name: Build
+        if: steps.changes.outputs.infra == 'true'
         run: sam build
 
+      # 3. Deploy Infrastructure (Only if infra changed)
       - name: Deploy Infrastructure
+        if: steps.changes.outputs.infra == 'true'
         run: |
           sam deploy --no-confirm-changeset --no-fail-on-empty-changeset \
             --stack-name deepgram-cloud-demo \
             --resolve-s3 --capabilities CAPABILITY_IAM \
             --region us-east-1
 
-      - name: Sync Frontend to S3
+      # 4. Sync Frontend (Run ALWAYS to ensure cache headers are fixed)
+      - name: Configure Frontend & Sync
+        if: always()
         run: |
-          # Get the bucket name from CloudFormation outputs
+          # A. Get Outputs from CloudFormation
           BUCKET=$(aws cloudformation describe-stacks --stack-name deepgram-cloud-demo --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" --output text)
-          echo "Syncing to $BUCKET"
-          aws s3 sync ./frontend s3://$BUCKET --delete
+          API_URL=$(aws cloudformation describe-stacks --stack-name deepgram-cloud-demo --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" --output text)
+          
+          echo "Syncing to Bucket: $BUCKET"
+          echo "Using API URL: $API_URL"
+
+          # B. Inject the API URL into main.js
+          # This looks for 'YOUR_LAMBDA_FUNCTION_URL_HERE' and replaces it with the real URL
+          sed -i "s|YOUR_LAMBDA_FUNCTION_URL_HERE|$API_URL|g" ./frontend/*.js
+
+          # C. Sync ALL files with NO CACHE headers
+          # This forces the browser to download fresh files every time
+          aws s3 sync ./frontend s3://$BUCKET --delete --cache-control "no-store, no-cache, must-revalidate, max-age=0"
