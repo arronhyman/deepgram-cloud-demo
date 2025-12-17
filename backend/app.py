@@ -1,118 +1,200 @@
-import json
-import os
-import boto3
-from datetime import datetime
+// YOUR SPECIFIC LAMBDA URL
+const API_URL = "https://sapucalvhlquhnlmlerjslz7se0gmbto.lambda-url.us-east-1.on.aws/";
 
-# Initialize AWS Services
-dynamodb = boto3.resource('dynamodb')
-bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')
-secrets = boto3.client('secretsmanager')
+let socket;
+let mediaRecorder;
+let deepgramKey;
 
-def get_deepgram_key():
-    try:
-        # Retrieves the ARN you defined in template.yaml
-        secret_arn = os.environ.get('SECRETS_ARN') 
-        if not secret_arn:
-            return None
-        response = secrets.get_secret_value(SecretId=secret_arn)
-        return json.loads(response['SecretString'])['api_key']
-    except Exception as e:
-        print(f"Secret Error: {e}")
-        return None
+// TTS state
+let isSpeaking = false;
+let currentAudio = null;
 
-def lambda_handler(event, context):
-    headers = {
-        "Content-Type": "application/json"
+// Transcript debounce
+let lastTranscriptTime = 0;
+
+document.getElementById('micBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('micBtn');
+
+    // ----------------------
+    // STOP SESSION
+    // ----------------------
+    if (btn.classList.contains("active")) {
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+        }
+        if (socket) socket.close();
+
+        if (currentAudio) {
+            currentAudio.pause();
+            currentAudio = null;
+            isSpeaking = false;
+        }
+
+        btn.innerText = "Start Demo";
+        btn.classList.remove("active");
+        document.getElementById('transcript').innerText = "Session ended.";
+        document.getElementById('ai-response').innerText = "";
+        return;
     }
 
-    # 1. Handle CORS Preflight
-    if event.get('requestContext', {}).get('http', {}).get('method') == 'OPTIONS':
-        return {"statusCode": 200, "headers": headers}
+    // ----------------------
+    // AUTH
+    // ----------------------
+    btn.innerText = "Connecting...";
+    try {
+        const authRes = await fetch(API_URL + "?route=auth");
+        const authData = await authRes.json();
 
-    # 2. Parse Inputs (Query Params OR Body)
-    query_params = event.get('queryStringParameters') or {}
-    
-    body = {}
-    if event.get('body'):
-        try:
-            body = json.loads(event.get('body'))
-        except:
-            pass
+        if (!authData.key) {
+            throw new Error(authData.error || "No API key returned");
+        }
 
-    # Determine Action
-    action = query_params.get('route') or query_params.get('action') or body.get('action', 'chat')
+        deepgramKey = authData.key;
+    } catch (e) {
+        alert("Auth Error: " + e.message);
+        btn.innerText = "Start Demo";
+        return;
+    }
 
-    # --- ROUTE 1: AUTH ---
-    if action == 'auth':
-        master_key = get_deepgram_key()
-        if not master_key:
-            return {
-                "statusCode": 500, 
-                "headers": headers, 
-                "body": json.dumps({"error": "API Key not configured in Secrets Manager"})
+    // ----------------------
+    // MICROPHONE
+    // ----------------------
+    let stream;
+    try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+        alert("Microphone Error: " + e.message);
+        btn.innerText = "Start Demo";
+        return;
+    }
+
+    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+
+    // ----------------------
+    // DEEPGRAM WS
+    // ----------------------
+    const dgParams = "model=nova-2&smart_format=true&sentiment=true&punctuate=true";
+    socket = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, [
+        "token",
+        deepgramKey
+    ]);
+
+    socket.onopen = () => {
+        btn.innerText = "Stop";
+        btn.classList.add("active");
+        document.getElementById('transcript').innerText = "Listening...";
+
+        mediaRecorder.addEventListener('dataavailable', event => {
+            if (event.data.size > 0 && socket.readyState === 1) {
+                socket.send(event.data);
             }
-        
-        # Return the key directly to the client
-        return {
-            "statusCode": 200,
-            "headers": headers,
-            "body": json.dumps({"key": master_key})
+        });
+
+        mediaRecorder.start(250);
+    };
+
+    socket.onmessage = async (message) => {
+        const received = JSON.parse(message.data);
+        const alternative = received.channel?.alternatives?.[0];
+
+        if (!received.is_final || !alternative?.transcript) return;
+
+        // ----------------------
+        // DEBOUNCE FINALS
+        // ----------------------
+        const now = Date.now();
+        if (now - lastTranscriptTime < 1500) return;
+        lastTranscriptTime = now;
+
+        const transcript = alternative.transcript;
+        const sentiment = alternative.sentiment || "neutral";
+
+        document.getElementById('transcript').innerHTML =
+            `You (${sentiment}): ${transcript}`;
+
+        // ----------------------
+        // SEND TO AI
+        // ----------------------
+        document.getElementById('ai-response').innerText = "AI thinking...";
+
+        try {
+            const brainRes = await fetch(API_URL, {
+                method: "POST",
+                body: JSON.stringify({
+                    text: transcript,
+                    sentiment: sentiment
+                })
+            });
+
+            const brainData = await brainRes.json();
+            const aiResponse = brainData.response;
+
+            document.getElementById('ai-response').innerText =
+                `AI: ${aiResponse}`;
+
+            // ----------------------
+            // SPEAK (SERIALIZED)
+            // ----------------------
+            await speakWithDeepgram(aiResponse);
+
+        } catch (e) {
+            document.getElementById('ai-response').innerText =
+                "AI Error.";
+            console.error("AI Error:", e);
         }
+    };
 
-    # --- ROUTE 2: CHAT (With Sentiment) ---
-    user_text = body.get('text', '')
-    user_sentiment = body.get('sentiment', 'neutral') 
-    session_id = body.get('session_id', 'demo_session')
-    
-    if not user_text:
-        return {"statusCode": 400, "headers": headers, "body": json.dumps({"error": "No text"})}
+    socket.onclose = () => {
+        if (btn.classList.contains("active")) {
+            btn.click();
+        }
+    };
+});
 
-    # Prompt Engineering with Sentiment
-    prompt = f"""
-    User Input: "{user_text}"
-    Detected Sentiment: {user_sentiment}
-    
-    You are a helpful voice assistant. 
-    1. Answer the user's input clearly.
-    2. Adjust your tone based on the detected sentiment (e.g., if they are frustrated, be empathetic).
-    3. Keep your response short (max 2 sentences) because it will be spoken out loud.
-    """
-    
-    payload = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 150,
-        "messages": [{"role": "user", "content": prompt}]
+// ----------------------
+// TTS (NO OVERLAP)
+// ----------------------
+async function speakWithDeepgram(text) {
+    if (!deepgramKey || isSpeaking) return;
+
+    isSpeaking = true;
+
+    if (currentAudio) {
+        currentAudio.pause();
+        currentAudio = null;
     }
-    
-    try:
-        response = bedrock.invoke_model(
-            modelId='anthropic.claude-3-haiku-20240307-v1:0',
-            body=json.dumps(payload)
-        )
-        result = json.loads(response['body'].read())
-        ai_text = result['content'][0]['text']
-        
-        # Log to DynamoDB
-        table_name = os.environ.get('TABLE_NAME')
-        if table_name:
-            dynamodb.Table(table_name).put_item(Item={
-                'session_id': session_id,
-                'timestamp': datetime.now().isoformat(),
-                'user': user_text,
-                'sentiment': user_sentiment,
-                'ai': ai_text
-            })
 
-        return {
-            "statusCode": 200, 
-            "headers": headers, 
-            "body": json.dumps({"response": ai_text})
-        }
-        
-    except Exception as e:
-        print(f"Bedrock Error: {e}")
-        return {
-            "statusCode": 500, 
-            "headers": headers, 
-            "body": json.dumps({"error": str(e)})
-        }
+    const url = "https://api.deepgram.com/v1/speak?model=aura-asteria-en";
+
+    try {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {
+                "Authorization": `Token ${deepgramKey}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ text })
+        });
+
+        const blob = await response.blob();
+        const audioUrl = URL.createObjectURL(blob);
+        currentAudio = new Audio(audioUrl);
+
+        currentAudio.onended = () => {
+            isSpeaking = false;
+            currentAudio = null;
+        };
+
+        currentAudio.onerror = () => {
+            isSpeaking = false;
+            currentAudio = null;
+        };
+
+        await currentAudio.play();
+
+    } catch (e) {
+        console.error("TTS Error:", e);
+        isSpeaking = false;
+        currentAudio = null;
+    }
+}
