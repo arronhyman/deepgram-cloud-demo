@@ -1,29 +1,26 @@
-// YOUR SPECIFIC LAMBDA URL
 const API_URL = "https://sapucalvhlquhnlmlerjslz7se0gmbto.lambda-url.us-east-1.on.aws/"; 
 
 let socket;
 let mediaRecorder;
 let deepgramKey; 
 
+// STATE MANAGEMENT
+let isAiSpeaking = false; // "Gate" to stop listening when AI talks
+let audioQueue = [];      // Queue to prevent voices talking over each other
+let isAudioPlaying = false;
+
 document.getElementById('micBtn').addEventListener('click', async () => {
     const btn = document.getElementById('micBtn');
     
     // Toggle Logic
     if (btn.classList.contains("active")) {
-        // Stop Everything
-        if(mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
-        if(socket) socket.close();
-        
-        btn.innerText = "Start Demo";
-        btn.classList.remove("active");
-        document.getElementById('transcript').innerText = "Session ended.";
+        stopEverything();
         return;
     }
 
     // 1. Get Auth Token
     btn.innerText = "Connecting...";
-    try { 
-        // We use ?route=auth to hit the specific logic in Python
+    try {
         const authRes = await fetch(API_URL + "?route=auth");
         const authData = await authRes.json();
         
@@ -46,8 +43,9 @@ document.getElementById('micBtn').addEventListener('click', async () => {
     
     mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
 
-    // 3. Connect to Deepgram (Nova-2 + Sentiment + Smart Format)
-    const dgParams = "model=nova-2&smart_format=true&sentiment=true&punctuate=true";
+    // 3. Connect to Deepgram
+    // We added punctuate=true and endpointing=300 to make it snappier
+    const dgParams = "model=nova-2&smart_format=true&sentiment=true&punctuate=true&endpointing=300";
     socket = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, [
         'token', deepgramKey
     ]);
@@ -58,7 +56,9 @@ document.getElementById('micBtn').addEventListener('click', async () => {
         document.getElementById('transcript').innerText = "Listening...";
         
         mediaRecorder.addEventListener('dataavailable', event => {
-            if (event.data.size > 0 && socket.readyState === 1) {
+            // CRITICAL FIX: Only send audio if the AI is NOT speaking.
+            // This prevents the AI from hearing itself (Echo/Loop).
+            if (event.data.size > 0 && socket.readyState === 1 && !isAiSpeaking) {
                 socket.send(event.data);
             }
         });
@@ -71,45 +71,97 @@ document.getElementById('micBtn').addEventListener('click', async () => {
         
         if (alternative && received.is_final) {
             const transcript = alternative.transcript;
-            const sentiment = alternative.sentiment; // e.g., "positive", "negative"
+            const sentiment = alternative.sentiment;
             
-            if (transcript) {
+            // Only proceed if there is actual text
+            if (transcript && transcript.trim().length > 0) {
                 document.getElementById('transcript').innerHTML = 
                     `You (${sentiment}): ${transcript}`;
                 
                 // 4. Send to Bedrock (Brain)
                 document.getElementById('ai-response').innerText = "AI thinking...";
                 
-                const brainRes = await fetch(API_URL, {
-                    method: 'POST',
-                    body: JSON.stringify({ 
-                        text: transcript,
-                        sentiment: sentiment 
-                    })
-                });
-                const brainData = await brainRes.json();
-                const aiResponse = brainData.response;
-                
-                document.getElementById('ai-response').innerText = `AI: ${aiResponse}`;
-                
-                // 5. Speak Result (Deepgram Aura)
-                await speakWithDeepgram(aiResponse);
+                // We fire this asynchronously so we don't block the UI
+                handleAiProcessing(transcript, sentiment);
             }
         }
     };
     
     socket.onclose = () => {
-        if (btn.classList.contains("active")) {
-             btn.click(); // Trigger stop UI cleanup
-        }
+        if (btn.classList.contains("active")) stopEverything();
     };
 });
 
-// TTS Function
-async function speakWithDeepgram(text) {
-    if (!deepgramKey) return;
+function stopEverything() {
+    const btn = document.getElementById('micBtn');
+    if(mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    if(socket) socket.close();
     
-    // Aura model: aura-asteria-en (Female) or aura-orion-en (Male)
+    btn.innerText = "Start Demo";
+    btn.classList.remove("active");
+    document.getElementById('transcript').innerText = "Session ended.";
+    isAiSpeaking = false;
+    audioQueue = [];
+}
+
+async function handleAiProcessing(text, sentiment) {
+    try {
+        const brainRes = await fetch(API_URL, {
+            method: 'POST',
+            body: JSON.stringify({ text, sentiment })
+        });
+        const brainData = await brainRes.json();
+        const aiResponse = brainData.response;
+        
+        document.getElementById('ai-response').innerText = `AI: ${aiResponse}`;
+        
+        // 5. Queue the audio instead of playing immediately
+        await queueAudio(aiResponse);
+    } catch (e) {
+        console.error("AI Error:", e);
+    }
+}
+
+// --- AUDIO QUEUE SYSTEM ---
+
+async function queueAudio(text) {
+    // We fetch the audio blob immediately (prefetching) to reduce wait time
+    const audioBlob = await fetchDeepgramAudio(text);
+    if (!audioBlob) return;
+
+    // Add to queue
+    audioQueue.push(audioBlob);
+    
+    // If nothing is playing, start the player
+    if (!isAudioPlaying) {
+        playNextInQueue();
+    }
+}
+
+async function playNextInQueue() {
+    if (audioQueue.length === 0) {
+        isAudioPlaying = false;
+        isAiSpeaking = false; // Re-open the microphone
+        return;
+    }
+
+    isAudioPlaying = true;
+    isAiSpeaking = true; // Mute the microphone logic
+
+    const blob = audioQueue.shift();
+    const audioUrl = URL.createObjectURL(blob);
+    const audio = new Audio(audioUrl);
+
+    audio.onended = () => {
+        // Recursively play the next one
+        playNextInQueue();
+    };
+
+    audio.play();
+}
+
+async function fetchDeepgramAudio(text) {
+    if (!deepgramKey) return null;
     const url = "https://api.deepgram.com/v1/speak?model=aura-asteria-en";
     
     try {
@@ -121,12 +173,9 @@ async function speakWithDeepgram(text) {
             },
             body: JSON.stringify({ text: text })
         });
-
-        const blob = await response.blob();
-        const audioUrl = URL.createObjectURL(blob);
-        const audio = new Audio(audioUrl);
-        audio.play();
+        return await response.blob();
     } catch (e) {
         console.error("TTS Error:", e);
+        return null;
     }
 }
