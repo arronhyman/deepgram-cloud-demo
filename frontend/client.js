@@ -3,7 +3,9 @@ const API_URL = "https://sapucalvhlquhnlmlerjslz7se0gmbto.lambda-url.us-east-1.o
 
 let socket;
 let mediaRecorder;
-let deepgramKey; 
+let deepgramKey;
+let isSpeaking = false;
+let currentAudio = null 
 
 document.getElementById('micBtn').addEventListener('click', async () => {
     const btn = document.getElementById('micBtn');
@@ -107,7 +109,10 @@ document.getElementById('micBtn').addEventListener('click', async () => {
 
 // TTS Function
 async function speakWithDeepgram(text) {
-    if (!deepgramKey) return;
+    if (!deepgramKey || isSpeaking) return;  // Prevent new speech if already speaking
+    
+    isSpeaking = true;
+    document.getElementById('ai-response').innerText = `AI (speaking): ${text}`;  // Optional visual cue
     
     const url = "https://api.deepgram.com/v1/speak?model=aura-asteria-en";
     
@@ -120,38 +125,37 @@ async function speakWithDeepgram(text) {
             },
             body: JSON.stringify({ text })
         });
-
-        if (!response.ok || !response.body) {
-            console.error("TTS fetch failed");
-            return;
-        }
-
-        // Set up Web Audio API
+        
+        if (!response.ok || !response.body) throw new Error("TTS failed");
+        
         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
         const reader = response.body.getReader();
-        let chunks = [];
-
+        const chunks = [];
+        
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
             chunks.push(value);
-
-            // Optional: Start decoding/playback early after first few chunks
-            // But for simplicity, collect all then play (still faster than blob)
         }
-
-        const fullBlob = new Blob(chunks, { type: 'audio/mpeg' }); // or 'audio/wav' if you change encoding
-
-        // Decode and play (this is fast once data is here)
-        const arrayBuffer = await fullBlob.arrayBuffer();
+        
+        const blob = new Blob(chunks, { type: 'audio/mpeg' });  // Deepgram REST defaults to MP3
+        const arrayBuffer = await blob.arrayBuffer();
         const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
+        
         const source = audioContext.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(audioContext.destination);
+        
+        // Optional: Allow barge-in (stop current if user speaks)
+        source.onended = () => {
+            isSpeaking = false;
+        };
+        
         source.start(0);
-
+        currentAudio = source;  // If you want to stop mid-playback
+        
     } catch (e) {
         console.error("TTS Error:", e);
+        isSpeaking = false;
     }
 }
