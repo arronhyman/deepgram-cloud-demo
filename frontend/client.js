@@ -1,135 +1,244 @@
-// YOUR SPECIFIC LAMBDA URL
-const API_URL = "https://sapucalvhlquhnlmlerjslz7se0gmbto.lambda-url.us-east-1.on.aws/"; 
+const micBtn = document.getElementById("micBtn");
+const transcriptDiv = document.getElementById("transcript");
+const aiResponseDiv = document.getElementById("ai-response");
 
-let socket;
-let mediaRecorder;
-let deepgramKey; 
-let isSpeaking = false;
-let currentAudio = null;
+const LAMBDA_URL =
+  "https://sapucalvhlquhnlmlerjslz7se0gmbto.lambda-url.us-east-1.on.aws";
 
+let deepgramKey = null;
+let sttSocket = null;
+let mediaRecorder = null;
 
-document.getElementById('micBtn').addEventListener('click', async () => {
-    const btn = document.getElementById('micBtn');
-    
-    // Toggle Logic
-    if (btn.classList.contains("active")) {
-        // Stop Everything
-        if(mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
-        if(socket) socket.close();
-        
-        btn.innerText = "Start Demo";
-        btn.classList.remove("active");
-        document.getElementById('transcript').innerText = "Session ended.";
-        return;
+let ttsSocket = null;
+let audioContext = null;
+let audioQueue = [];
+let isPlaying = false;
+
+let isActive = false;
+
+/* ---------------------------
+   INIT UI STATE
+---------------------------- */
+transcriptDiv.innerText = "";
+aiResponseDiv.innerText = "";
+micBtn.innerText = "Start Demo";
+
+/* ---------------------------
+   FETCH DEEPGRAM KEY
+---------------------------- */
+async function fetchDeepgramKey() {
+  const res = await fetch(`${LAMBDA_URL}?route=auth`);
+  const data = await res.json();
+  deepgramKey = data.key;
+}
+
+/* ---------------------------
+   START SESSION
+---------------------------- */
+async function startSession() {
+  if (isActive) return;
+  isActive = true;
+
+  micBtn.innerText = "Stop";
+  transcriptDiv.innerText = "Listening...";
+  aiResponseDiv.innerText = "";
+
+  if (!deepgramKey) {
+    await fetchDeepgramKey();
+  }
+
+  startSTT();
+}
+
+/* ---------------------------
+   STOP SESSION
+---------------------------- */
+function stopSession() {
+  isActive = false;
+
+  micBtn.innerText = "Start Demo";
+  transcriptDiv.innerText = "Session ended.";
+
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    mediaRecorder.stop();
+  }
+
+  if (sttSocket) {
+    sttSocket.close();
+    sttSocket = null;
+  }
+
+  if (ttsSocket) {
+    ttsSocket.close();
+    ttsSocket = null;
+  }
+
+  audioQueue = [];
+  isPlaying = false;
+}
+
+/* ---------------------------
+   STT (MIC → TEXT)
+---------------------------- */
+async function startSTT() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+
+  const sttUrl =
+    "wss://api.deepgram.com/v1/listen" +
+    "?model=nova-2" +
+    "&interim_results=true" +
+    "&endpointing=300";
+
+  sttSocket = new WebSocket(sttUrl, ["token", deepgramKey]);
+
+  sttSocket.onopen = () => {
+    mediaRecorder.start(250);
+  };
+
+  mediaRecorder.ondataavailable = (event) => {
+    if (event.data.size > 0 && sttSocket.readyState === 1) {
+      sttSocket.send(event.data);
     }
+  };
 
-    // 1. Get Auth Token
-    btn.innerText = "Connecting...";
-    try {
-        // We use ?route=auth to hit the specific logic in Python
-        const authRes = await fetch(API_URL + "?route=auth");
-        const authData = await authRes.json();
-        
-        if (!authData.key) throw new Error(authData.error || "No Key Returned");
-        deepgramKey = authData.key;
-    } catch (e) {
-        alert("Auth Error: " + e.message);
-        btn.innerText = "Start Demo";
-        return;
-    }
+  sttSocket.onmessage = async (event) => {
+    const data = JSON.parse(event.data);
+    const alt = data.channel?.alternatives?.[0];
+    if (!alt?.transcript) return;
 
-    // 2. Open Microphone
-    let stream;
-    try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (e) {
-        alert("Microphone Error: " + e.message);
-        return;
-    }
-    
-    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+    transcriptDiv.innerText = alt.transcript;
 
-    // 3. Connect to Deepgram (Nova-2 + Sentiment + Smart Format)
-    const dgParams = "model=nova-2&smart_format=true&sentiment=true&punctuate=true";
-    socket = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, [
-        'token', deepgramKey
-    ]);
+    if (!data.is_final) return;
+
+    mediaRecorder.stop();
+    sttSocket.close();
+
+    await handleAIResponse(alt.transcript);
+  };
+}
+
+/* ---------------------------
+   AI CALL
+---------------------------- */
+async function handleAIResponse(text) {
+  aiResponseDiv.innerText = "Thinking...";
+
+  const res = await fetch(LAMBDA_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+
+  const data = await res.json();
+  aiResponseDiv.innerText = data.response;
+
+  speakStreaming(data.response);
+}
+
+/* ---------------------------
+   STREAMING TTS
+---------------------------- */
+function speakStreaming(text) {
+  if (!deepgramKey) return;
+
+  const ttsUrl =
+    "wss://api.deepgram.com/v1/speak" +
+    "?model=aura-asteria-en" +
+    "&encoding=opus" +
+    "&container=webm";
+
+  const audio = document.createElement("audio");
+  audio.autoplay = true;
+
+  const mediaSource = new MediaSource();
+  audio.src = URL.createObjectURL(mediaSource);
+
+  mediaSource.addEventListener("sourceopen", () => {
+    const sourceBuffer = mediaSource.addSourceBuffer(
+      'audio/webm; codecs="opus"'
+    );
+
+    const socket = new WebSocket(ttsUrl, ["token", deepgramKey]);
+    socket.binaryType = "arraybuffer";
 
     socket.onopen = () => {
-        btn.innerText = "Stop";
-        btn.classList.add("active");
-        document.getElementById('transcript').innerText = "Listening...";
-        
-        mediaRecorder.addEventListener('dataavailable', event => {
-            if (event.data.size > 0 && socket.readyState === 1) {
-                socket.send(event.data);
-            }
-        });
-        mediaRecorder.start(250);
+      socket.send(JSON.stringify({ text }));
     };
 
-    socket.onmessage = async (message) => {
-        const received = JSON.parse(message.data);
-        const alternative = received.channel?.alternatives[0];
-        
-        if (alternative && received.is_final) {
-            const transcript = alternative.transcript;
-            const sentiment = alternative.sentiment; // e.g., "positive", "negative"
-            
-            if (transcript) {
-                document.getElementById('transcript').innerHTML = 
-                    `You (${sentiment}): ${transcript}`;
-                
-                // 4. Send to Bedrock (Brain)
-                document.getElementById('ai-response').innerText = "AI thinking...";
-                
-                const brainRes = await fetch(API_URL, {
-                    method: 'POST',
-                    body: JSON.stringify({ 
-                        text: transcript,
-                        sentiment: sentiment 
-                    })
-                });
-                const brainData = await brainRes.json();
-                const aiResponse = brainData.response;
-                
-                document.getElementById('ai-response').innerText = `AI: ${aiResponse}`;
-                
-                // 5. Speak Result (Deepgram Aura)
-                await speakWithDeepgram(aiResponse);
-            }
-        }
+    socket.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        sourceBuffer.appendBuffer(event.data);
+      }
     };
-    
+
     socket.onclose = () => {
-        if (btn.classList.contains("active")) {
-             btn.click(); // Trigger stop UI cleanup
-        }
+      mediaSource.endOfStream();
     };
-});
 
-// TTS Function
-async function speakWithDeepgram(text) {
-    if (!deepgramKey) return;
-    
-    // Aura model: aura-asteria-en (Female) or aura-orion-en (Male)
-    const url = "https://api.deepgram.com/v1/speak?model=aura-asteria-en";
-    
-    try {
-        const response = await fetch(url, {
-            method: "POST",
-            headers: {
-                "Authorization": `Token ${deepgramKey}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({ text: text })
-        });
-
-        const blob = await response.blob();
-        const audioUrl = URL.createObjectURL(blob);
-        const audio = new Audio(audioUrl);
-        audio.play();
-    } catch (e) {
-        console.error("TTS Error:", e);
-    }
+    socket.onerror = (e) => {
+      console.error("TTS socket error", e);
+    };
+  });
 }
+
+/* ---------------------------
+   AUDIO PIPELINE
+---------------------------- */
+async function playAudioQueue() {
+  if (audioQueue.length === 0) {
+    isPlaying = false;
+    return;
+  }
+
+  isPlaying = true;
+
+  const chunk = audioQueue.shift();
+  const wav = pcm16ToWav(chunk);
+  const buffer = await audioContext.decodeAudioData(wav);
+
+  const source = audioContext.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioContext.destination);
+  source.start();
+
+  source.onended = playAudioQueue;
+}
+
+/* ---------------------------
+   PCM → WAV
+---------------------------- */
+function pcm16ToWav(pcm) {
+  const pcm16 = new Int16Array(pcm);
+  const buffer = new ArrayBuffer(44 + pcm16.length * 2);
+  const view = new DataView(buffer);
+
+  const write = (o, s) => [...s].forEach((c, i) => view.setUint8(o + i, c.charCodeAt(0)));
+
+  write(0, "RIFF");
+  view.setUint32(4, 36 + pcm16.length * 2, true);
+  write(8, "WAVEfmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, 16000, true);
+  view.setUint32(28, 32000, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  write(36, "data");
+  view.setUint32(40, pcm16.length * 2, true);
+
+  let offset = 44;
+  for (let i = 0; i < pcm16.length; i++, offset += 2) {
+    view.setInt16(offset, pcm16[i], true);
+  }
+
+  return buffer;
+}
+
+/* ---------------------------
+   BUTTON
+---------------------------- */
+micBtn.onclick = () => {
+  isActive ? stopSession() : startSession();
+};
